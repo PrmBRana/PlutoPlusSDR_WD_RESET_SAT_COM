@@ -254,21 +254,9 @@ STM32_PROG ?= $(shell which STM32_Programmer_CLI 2>/dev/null || \
 # ==========================================================================
 
 flash: $(TARGET).bin
-	@if [ -x "$$(which $(STM32_PROG) 2>/dev/null)" ] || [ -x "$(STM32_PROG)" ]; then \
-	  echo "Flashing $(TARGET).bin to 0x08032000 using STM32_Programmer_CLI (CPU1 preserved)..."; \
-	  $(STM32_PROG) -c port=SWD mode=UR -w $(TARGET).bin 0x08032000 -v -hardRst 2>/dev/null || \
-	  $(STM32_PROG) -c port=SWD mode=HOTPLUG -w $(TARGET).bin 0x08032000 -v -hardRst 2>/dev/null || \
-	  $(STM32_PROG) -c port=SWD -w $(TARGET).bin 0x08032000 -v -hardRst || \
-	  (echo "STM32_Programmer_CLI failed. Trying OpenOCD fallback..." && \
-	  openocd -f interface/stlink.cfg -f target/stm32wlx.cfg -c "gdb_port disabled; tcl_port disabled; telnet_port disabled; init; halt; mww 0xE004203C 0x00001800; mww 0x40003000 0x0000AAAA; reg primask 1; mww 0x58004010 0x0000C3FB; mww 0x58004060 0x0000C3FB; flash write_image erase $(TARGET).bin 0x08032000 bin; verify_image $(TARGET).bin 0x08032000 bin; mww 0x58004000 [expr {[mrw 0x58004000] & ~0x10000}]; mww 0x5800040C 0x00008000; reset run; exit" 2>/dev/null || \
-	  openocd -f interface/stlink-dap.cfg -f target/stm32wlx.cfg -c "gdb_port disabled; tcl_port disabled; telnet_port disabled; init; halt; mww 0xE004203C 0x00001800; mww 0x40003000 0x0000AAAA; reg primask 1; mww 0x58004010 0x0000C3FB; mww 0x58004060 0x0000C3FB; flash write_image erase $(TARGET).bin 0x08032000 bin; verify_image $(TARGET).bin 0x08032000 bin; mww 0x58004000 [expr {[mrw 0x58004000] & ~0x10000}]; mww 0x5800040C 0x00008000; reset run; exit"); \
-	  echo "Booting CPU2 (Cortex-M0+) via PWR_CR4_C2BOOT..."; \
-	  $(STM32_PROG) -c port=SWD -w32 0x5800040C 0x00008000 2>/dev/null || true; \
-	else \
-	  echo "Flashing $(TARGET).bin to 0x08032000 using OpenOCD (CPU1 preserved)..."; \
-	  openocd -f interface/stlink.cfg -f target/stm32wlx.cfg -c "gdb_port disabled; tcl_port disabled; telnet_port disabled; init; halt; mww 0xE004203C 0x00001800; mww 0x40003000 0x0000AAAA; reg primask 1; mww 0x58004010 0x0000C3FB; mww 0x58004060 0x0000C3FB; flash write_image erase $(TARGET).bin 0x08032000 bin; verify_image $(TARGET).bin 0x08032000 bin; mww 0x58004000 [expr {[mrw 0x58004000] & ~0x10000}]; mww 0x5800040C 0x00008000; reset run; exit" 2>/dev/null || \
-	  openocd -f interface/stlink-dap.cfg -f target/stm32wlx.cfg -c "gdb_port disabled; tcl_port disabled; telnet_port disabled; init; halt; mww 0xE004203C 0x00001800; mww 0x40003000 0x0000AAAA; reg primask 1; mww 0x58004010 0x0000C3FB; mww 0x58004060 0x0000C3FB; flash write_image erase $(TARGET).bin 0x08032000 bin; verify_image $(TARGET).bin 0x08032000 bin; mww 0x58004000 [expr {[mrw 0x58004000] & ~0x10000}]; mww 0x5800040C 0x00008000; reset run; exit"; \
-	fi
+	@echo "Flashing $(TARGET).bin to 0x08032000 using OpenOCD (CPU1 preserved)..."
+	@openocd -s /usr/share/openocd/scripts -f interface/stlink-dap.cfg -f target/stm32wlx.cfg -c "gdb_port disabled; tcl_port disabled; telnet_port disabled; init; halt; mww 0xE004203C 0x00001800; mww 0xE0042040 0x00001800; mww 0x40003000 0x0000AAAA; mww 0x58004010 0x0000C3FB; mww 0x58004060 0x0000C3FB; flash probe 0; flash erase_sector 0 100 127; halt; mww 0x40003000 0x0000AAAA; reg xpsr 0x01000000; reg msp 0x20004000; reg sp 0x20004000; reg primask 1; flash write_image $(TARGET).bin 0x08032000 bin; verify_image $(TARGET).bin 0x08032000 bin; mww 0x58004000 [expr {[mrw 0x58004000] & ~0x10000}]; mww 0x5800040C 0x00008000; reset run; exit" || \
+	openocd -s /usr/share/openocd/scripts -f interface/stlink.cfg -f target/stm32wlx.cfg -c "gdb_port disabled; tcl_port disabled; telnet_port disabled; init; halt; mww 0xE004203C 0x00001800; mww 0xE0042040 0x00001800; mww 0x40003000 0x0000AAAA; mww 0x58004010 0x0000C3FB; mww 0x58004060 0x0000C3FB; flash probe 0; flash erase_sector 0 100 127; halt; mww 0x40003000 0x0000AAAA; reg xpsr 0x01000000; reg msp 0x20004000; reg sp 0x20004000; reg primask 1; flash write_image $(TARGET).bin 0x08032000 bin; verify_image $(TARGET).bin 0x08032000 bin; mww 0x58004000 [expr {[mrw 0x58004000] & ~0x10000}]; mww 0x5800040C 0x00008000; reset run; exit"
 
 
 sat SAT: $(TARGET).bin

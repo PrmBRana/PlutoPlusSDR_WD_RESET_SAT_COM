@@ -221,10 +221,9 @@ namespace OpenBirdsOperation
             dataGridView1.Rows.Add("53011DD2F200F2000000000001", "Request HK2 Telemetry (Currents & Flags - 1 Pkt)", "OBC");
             dataGridView1.Rows.Add("53011DD1F200F2000000000005", "Download Stored HK Data (5 Pkts @ 128B)", "OBC");
             dataGridView1.Rows.Add("53011DD1F80000000000000005", "Request Flash Storage Telemetry (5 Chunks @ 128B)", "OBC");
-            dataGridView1.Rows.Add("5304CC5EBE00D0000000000045", "Transmit Dummy Image Data (69 Chunks / DC)", "Camera");
-            dataGridView1.Rows.Add("5304CC5EBD0000000000000000", "Real Camera Data Downlink (All Chunks / CAM)", "Camera");
-            dataGridView1.Rows.Add("5304CC5EBC0000000000000000", "Real Camera Capture to Flash (CAMON / SNAP)", "Camera");
-            dataGridView1.Rows.Add("53011DD2F50000000000000045", "Downlink Camera Photo Packets (cam.txt - 69 Pkts)", "Camera");
+            dataGridView1.Rows.Add("5304CC5EBE00D0000000000045", "Dummy Camera Capture to Flash (MSN+CAM -> ADCS / DC)", "Camera");
+            dataGridView1.Rows.Add("5304CC5EBC0000000000000000", "Real Camera Capture to Flash (MSN+0xCA -> ADCS / CAMON)", "Camera");
+            dataGridView1.Rows.Add("5304CC5EBD0000000000000000", "Camera Data Downlink - Real & Dummy from Flash (CAM)", "Camera");
             dataGridView1.Rows.Add("53011DD1F50000000000000001", "Ping Satellite OBC (PING -> ACK)", "OBC");
             dataGridView1.Rows.Add("5303A053CF0000000000000001", "ADCS ON: Run ADCS Mission (Opcode A0 53 CF)", "ADCS");
             dataGridView1.Rows.Add("5305ECCFCF0000000000000001", "EPDM ON: Run EPDM Mission (Opcode EC CF CF)", "EPDM");

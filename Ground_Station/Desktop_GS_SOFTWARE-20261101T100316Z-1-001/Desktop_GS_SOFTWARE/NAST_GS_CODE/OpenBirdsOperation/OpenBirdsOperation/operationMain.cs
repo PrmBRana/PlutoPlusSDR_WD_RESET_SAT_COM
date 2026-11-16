@@ -702,26 +702,44 @@ namespace OpenBirdsOperation
 
         public async Task Transmit_async()
         {
-            string Sending_command = Command_HEX.Text;
+            string Sending_command = Command_HEX.Text != null ? Command_HEX.Text.Trim() : "";
             string Sending_coments = Comments.Text;
 
-
-            //2021/06/13 only check 13bytes
-            if (Regex.IsMatch(Sending_command, ".. .. .. .. .. .. .. .. .. .. .. .. .."))
+            if (string.IsNullOrWhiteSpace(Sending_command))
             {
-                Console.WriteLine("13 bytes command");
-                Sending_command = Sending_command.Substring(0, 38);
-            }
-            else
-            {
-                Console.WriteLine("invalid length");
-                MessageBox.Show("Invalid length");
+                MessageBox.Show("Command is NULL or empty — rejected.", "Null Command Rejected", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            if (Sending_command == "00 00 00 00 00 00 00 00 00 00 00 00 00")
+            // Validate 13-byte hex format
+            if (Sending_command.Length >= 38 && Regex.IsMatch(Sending_command.Substring(0, 38), @"^[0-9A-Fa-f]{2}( [0-9A-Fa-f]{2}){12}$"))
             {
-                MessageBox.Show("The command is all 00\n", "Invalid command");
+                Console.WriteLine("13 bytes command");
+                Sending_command = Sending_command.Substring(0, 38).ToUpper();
+            }
+            else
+            {
+                Console.WriteLine("invalid length or non-hex command");
+                MessageBox.Show("Invalid or null 13-byte hex telecommand — rejected.", "Invalid Command Rejected", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (Sending_command == "00 00 00 00 00 00 00 00 00 00 00 00 00" ||
+                Sending_command == "FF FF FF FF FF FF FF FF FF FF FF FF FF")
+            {
+                MessageBox.Show("The command is NULL (all 0x00 or all 0xFF) — rejected.\n", "Null Command Rejected", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            string[] cmdBytes = Sending_command.Split(' ');
+            if (cmdBytes.Length != 13 || cmdBytes[0] != "53" || cmdBytes[1] == "00" ||
+                (cmdBytes[2] == "00" && cmdBytes[3] == "00" && cmdBytes[4] == "00"))
+            {
+                MessageBox.Show(
+                    "Telecommand rejected: header must be 0x53 with a non-null mission ID and opcode.\n",
+                    "Invalid Telecommand Rejected",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
                 return;
             }
 
@@ -760,9 +778,11 @@ namespace OpenBirdsOperation
                 string uplinkCommand;
 
                 // Match gs_communicator.py & gs_app.c built-in command handlers
+                // DC    (53 04 CC 5E BE ...): Dummy Camera Capture ('MSN'+'CAM' -> ADCS -> Flash CAM partition, NO immediate downlink)
+                // CAMON (53 04 CC 5E BC ...): Real Camera Capture  ('MSN'+0xCA  -> ADCS -> Flash CAM partition, NO immediate downlink)
+                // CAM   (53 04 CC 5E BD ...): Unified Camera Data Downlink (streams stored Real or Dummy image from Flash CAM partition)
                 if (cleanHex == "53 04 CC 5E BE 00 D0 00 00 00 00 00 45")
                 {
-                    camHistoryLines.Clear();
                     uplinkCommand = "DC";
                 }
                 else if (cleanHex == "53 04 CC 5E BD 00 00 00 00 00 00 00 00")
@@ -788,7 +808,7 @@ namespace OpenBirdsOperation
                 }
                 else
                 {
-                    if (cleanHex.StartsWith("53 04 CC 5E BE") || cleanHex.StartsWith("53 04 CC 5E BD") || cleanHex.StartsWith("53 01 1D D2 F5"))
+                    if (cleanHex.StartsWith("53 04 CC 5E BD"))
                     {
                         camHistoryLines.Clear();
                     }
@@ -814,21 +834,21 @@ namespace OpenBirdsOperation
         public void TransmitDummyCameraCommand()
         {
             Command_HEX.Text = "53 04 CC 5E BE 00 D0 00 00 00 00 00 45";
-            Comments.Text = "Transmit Dummy Image Data (69 Chunks / DC)";
+            Comments.Text = "Dummy Camera Capture to Flash (MSN+CAM -> ADCS / DC)";
             var _ = Transmit_async();
         }
 
         public void TransmitRealCameraCommand()
         {
             Command_HEX.Text = "53 04 CC 5E BD 00 00 00 00 00 00 00 00";
-            Comments.Text = "Real Camera Data Downlink (All Chunks / CAM)";
+            Comments.Text = "Camera Data Downlink - Real & Dummy from Flash (CAM)";
             var _ = Transmit_async();
         }
 
         public void TransmitRealCameraCaptureCommand()
         {
             Command_HEX.Text = "53 04 CC 5E BC 00 00 00 00 00 00 00 00";
-            Comments.Text = "Real Camera Capture to Flash (CAMON / SNAP)";
+            Comments.Text = "Real Camera Capture to Flash (MSN+0xCA -> ADCS / CAMON)";
             var _ = Transmit_async();
         }
 
@@ -2185,6 +2205,41 @@ namespace OpenBirdsOperation
             return s.Length <= 120 ? s : s.Substring(s.Length - 120);
         }
 
+        private static bool IsNullOrBlankPayloadHex(string line)
+        {
+            if (string.IsNullOrWhiteSpace(line)) return true;
+
+            string hex = null;
+            Match mJson = Regex.Match(line, "\"hex\"\\s*:\\s*\"([0-9a-fA-F\\s]+)\"");
+            if (mJson.Success)
+            {
+                hex = mJson.Groups[1].Value.Replace(" ", "");
+            }
+            else if (line.IndexOf("[CAMERA-HEX]", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                int idx = line.IndexOf("[CAMERA-HEX]", StringComparison.OrdinalIgnoreCase) + "[CAMERA-HEX]".Length;
+                hex = Regex.Replace(line.Substring(idx), @"[^0-9a-fA-F]", "");
+            }
+            else if (line.IndexOf("[FLASH-HEX]", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                int idx = line.IndexOf("[FLASH-HEX]", StringComparison.OrdinalIgnoreCase) + "[FLASH-HEX]".Length;
+                hex = Regex.Replace(line.Substring(idx), @"[^0-9a-fA-F]", "");
+            }
+
+            if (string.IsNullOrEmpty(hex) || hex.Length < 4) return false;
+
+            bool allZero = true;
+            bool allFf = true;
+            for (int i = 0; i < hex.Length; i++)
+            {
+                char c = char.ToUpperInvariant(hex[i]);
+                if (c != '0') allZero = false;
+                if (c != 'F') allFf = false;
+                if (!allZero && !allFf) return false;
+            }
+            return true;
+        }
+
         public void ProcessIncomingCwLine(string rawLine)
         {
             if (string.IsNullOrWhiteSpace(rawLine)) return;
@@ -2207,16 +2262,38 @@ namespace OpenBirdsOperation
                 inputDialogCW.FeedLine(line);
             }
 
+            // Detect Satellite NACK (Null Command / Empty or Null Flash Read rejection)
+            bool isNackLine = (line.IndexOf("\"type\":\"NACK\"", StringComparison.OrdinalIgnoreCase) >= 0) ||
+                              (line.IndexOf("[SATELLITE-NACK]", StringComparison.OrdinalIgnoreCase) >= 0);
+            if (isNackLine)
+            {
+                if (inputDialogHK != null && !inputDialogHK.IsDisposed)
+                {
+                    inputDialogHK.AppendLiveHkLine(line);
+                }
+                if (inputDialogCamera != null && !inputDialogCamera.IsDisposed)
+                {
+                    inputDialogCamera.AppendLiveCameraLine(line);
+                }
+            }
+
             // Capture and forward live HK telemetry packets ({"type":"HK",...} or [FLASH-HEX])
             bool isHkLine = (line.IndexOf("\"type\":\"HK\"", StringComparison.OrdinalIgnoreCase) >= 0) ||
                             (line.IndexOf("[FLASH-HEX]", StringComparison.OrdinalIgnoreCase) >= 0);
             if (isHkLine)
             {
-                hkHistoryLines.Add(line);
-                if (hkHistoryLines.Count > 500) hkHistoryLines.RemoveAt(0);
-                if (inputDialogHK != null && !inputDialogHK.IsDisposed)
+                if (IsNullOrBlankPayloadHex(line))
                 {
-                    inputDialogHK.AppendLiveHkLine(line);
+                    Console.WriteLine("[REJECTED] Null/blank HK flash packet ignored.");
+                }
+                else
+                {
+                    hkHistoryLines.Add(line);
+                    if (hkHistoryLines.Count > 500) hkHistoryLines.RemoveAt(0);
+                    if (inputDialogHK != null && !inputDialogHK.IsDisposed)
+                    {
+                        inputDialogHK.AppendLiveHkLine(line);
+                    }
                 }
             }
 
@@ -2225,11 +2302,18 @@ namespace OpenBirdsOperation
                              (line.IndexOf("[CAMERA-HEX]", StringComparison.OrdinalIgnoreCase) >= 0);
             if (isCamLine)
             {
-                camHistoryLines.Add(line);
-                if (camHistoryLines.Count > 1000) camHistoryLines.RemoveAt(0);
-                if (inputDialogCamera != null && !inputDialogCamera.IsDisposed)
+                if (IsNullOrBlankPayloadHex(line))
                 {
-                    inputDialogCamera.AppendLiveCameraLine(line);
+                    Console.WriteLine("[REJECTED] Null/blank Camera flash chunk ignored.");
+                }
+                else
+                {
+                    camHistoryLines.Add(line);
+                    if (camHistoryLines.Count > 1000) camHistoryLines.RemoveAt(0);
+                    if (inputDialogCamera != null && !inputDialogCamera.IsDisposed)
+                    {
+                        inputDialogCamera.AppendLiveCameraLine(line);
+                    }
                 }
             }
 

@@ -1,0 +1,30 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config EXAMPLES_ADCS
+	tristate "\ADCS example"
+	default n
+	---help---
+		Enable the \"ADCS\" example
+
+if EXAMPLES_ADCS
+
+config EXAMPLES_ADCS_PROGNAME
+	string "Program name"
+	default "ADCS"
+	---help---
+		This is the name of the program that will be used when the NSH ELF
+		program is installed.
+
+config EXAMPLES_ADCS_PRIORITY
+	int "ADCS task priority"
+	default 100
+
+config EXAMPLES_ADCS_STACKSIZE
+	int "ADCS stack size"
+	default DEFAULT_TASK_STACKSIZE
+
+endif
+

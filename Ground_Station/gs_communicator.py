@@ -952,8 +952,8 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
 
             stats = [
                 ("Housekeeping (HK) Telemetry Packets", f"{hk_count} records"),
-                ("Real Camera Photo Chunks (Flash Part 2)", f"{real_cam_count}/69 chunks received"),
-                ("Dummy Camera Test Chunks (M4 Memory)", f"{dummy_cam_count}/69 chunks received"),
+                ("Real Camera Photo Chunks (Flash CAM Partition)", f"{real_cam_count}/69 chunks received"),
+                ("Dummy Camera Chunks (ADCS -> Flash CAM Partition)", f"{dummy_cam_count}/69 chunks received"),
                 ("Raw Flash Storage Packets", f"{flash_count} chunks received"),
                 ("Total RF Packets Received", f"{state.get('packets_rx', 0) + hk_count + real_cam_count + dummy_cam_count}"),
             ]
@@ -973,8 +973,8 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
             ws1["A20"].font = FONT_SECTION
             topics = [
                 ("Sheet: Housekeeping (HK)", "Voltages (Bat, Solar, Bus), Temps (Ant, Bat, BPB), Currents (Unreg, 3V3, 5V, Bat), Gyro & Mag IMU"),
-                ("Sheet: Real Camera Photo", "JPEG Photo chunks downlinked from CubeSat camera stored in flash partition 2"),
-                ("Sheet: Dummy Camera Test", "Pre-stored dummy camera chunks downlinked directly from OBC M4 memory (camera_dummy_image.h)"),
+                ("Sheet: Real Camera Photo", "JPEG Photo chunks captured via 'MSN' + 0xCA -> ADCS, stored in Flash CAM partition, downlinked via CC 5E BD"),
+                ("Sheet: Dummy Camera Test", "Dummy JPEG chunks captured via 'MSN' + 'CAM' -> ADCS, stored in same Flash CAM partition, downlinked via CC 5E BD"),
                 ("Sheet: Flash Storage Data", "Raw 128-byte flash storage memory chunks from /dev/hk and /dev/camera"),
             ]
             for r_idx, (k, v) in enumerate(topics, start=21):
@@ -1073,7 +1073,7 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
 
             ws3.merge_cells("A1:K1")
             t3 = ws3["A1"]
-            t3.value = "  Real Camera Photo Downlink Chunks (Stored in Flash Partition 2 - JPEG OV2640 / ArduCam)"
+            t3.value = "  Real Camera Photo Downlink Chunks ('MSN' + 0xCA -> ADCS -> Flash CAM Partition -> Downlink CC 5E BD)"
             t3.font = Font(name="Segoe UI", size=13, bold=True, color="FFFFFF")
             t3.fill = FILL_HEADER_BLUE
             t3.alignment = Alignment(horizontal="left", vertical="center")
@@ -1135,7 +1135,7 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
 
             ws4.merge_cells("A1:K1")
             t4 = ws4["A1"]
-            t4.value = "  Dummy Camera Test Chunks (Streamed directly from M4 Memory camera_dummy_image.h - 69 Chunks x 128B = 8774B)"
+            t4.value = "  Dummy Camera Downlink Chunks ('MSN' + 'CAM' -> ADCS -> Same Flash CAM Partition -> Downlink CC 5E BD)"
             t4.font = Font(name="Segoe UI", size=13, bold=True, color="FFFFFF")
             t4.fill = FILL_HEADER_BLUE
             t4.alignment = Alignment(horizontal="left", vertical="center")
@@ -1672,8 +1672,7 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
     target_options = {
         "📊 sat_health.txt (HK Telemetry) - Opcode 1D D1 F2": (MCU_ID_OBC, OPCODE_HK, 0x0000),
         "💾 raw_flash.bin (Flash Storage) - Opcode 1D D1 F8": (MCU_ID_OBC, OPCODE_FLASH, 0x0000),
-        "📷 Real Camera Data Downlink - Opcode CC 5E BD": (MCU_ID_CAM, OPCODE_CAM_REAL_DOWN, 0x0000),
-        "🧪 Dummy Camera Test Downlink - Opcode CC 5E BE": (MCU_ID_CAM, OPCODE_CAM_DUMMY, DATA_ID_DUMMY),
+        "📷 Camera Data Downlink (Real & Dummy Flash CAM) - Opcode CC 5E BD": (MCU_ID_CAM, OPCODE_CAM_REAL_DOWN, 0x0000),
         "📷 cam.txt (Legacy OBC Download) - Opcode 1D D2 F5": (MCU_ID_OBC, OPCODE_CAM_DOWN, 0x0000),
     }
     target_var = tk.StringVar(value="📊 sat_health.txt (HK Telemetry) - Opcode 1D D1 F2")
@@ -1855,12 +1854,12 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
          hk_raw, f"HK request sent ({hk_hex})"),
         ("💾 Request Flash Storage Telemetry (5 Chunks @ 128B)",
          flash_raw, f"Flash read sent ({flash_hex})"),
-        ("🧪 Send Dummy Camera Test Command (53 04 CC 5E BE... - 69 Chunks)",
-         cam_dummy_raw, f"Dummy Camera Test sent ({cam_dummy_hex} - 69 Chunks)"),
-        ("📷 Real Camera Data Downlink (53 04 CC 5E BD 00 00 00 00 00 00 00 00)",
-         cam_real_down_raw, f"Real Camera Data Downlink sent ({cam_real_down_hex})"),
-        ("📸 Real Camera Capture (UART2 /dev/ttyS1 -> Flash, NO downlink)",
-         cam_cap_raw, f"Real Camera trigger sent ({cam_cap_hex})"),
+        ("🧪 Dummy Camera Capture (53 04 CC 5E BE... -> OBC 'MSN' + 'CAM' to ADCS -> Flash CAM, NO downlink)",
+         cam_dummy_raw, f"Dummy Camera Capture trigger sent ({cam_dummy_hex} -> 'MSN' + 'CAM' to ADCS -> Flash CAM)"),
+        ("📸 Real Camera Capture (53 04 CC 5E BC... -> OBC 'MSN' + 0xCA to ADCS -> Flash CAM, NO downlink)",
+         cam_cap_raw, f"Real Camera Capture trigger sent ({cam_cap_hex} -> 'MSN' + 0xCA to ADCS -> Flash CAM)"),
+        ("📷 Camera Data Downlink - Real & Dummy from Flash CAM (53 04 CC 5E BD 00 00 00 00 00 00 00 00)",
+         cam_real_down_raw, f"Camera Data Downlink sent ({cam_real_down_hex})"),
         ("📥 Downlink Camera Photo Packets (Legacy Opcode 1D D2 F5)",
          cam_down_raw, f"Camera photo download request sent ({cam_down_hex})"),
         ("🧭 ADCS ON: Run ADCS Mission (Opcode A0 53 CF)",
@@ -2489,16 +2488,15 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
     c_row2.pack(fill=tk.X, padx=4, pady=3)
 
     def on_cam_dummy_btn():
-        clear_camera_buffer()
         send_text("DC")
-        set_ack_state("await", "Dummy Camera Test", "Downlinking all 69 chunks (8.8KB image)")
+        set_ack_state("await", "Dummy Camera Capture", "OBC handshakes 'MSN' & sends 'CAM' to ADCS -> stores dummy JPEG in Flash CAM partition")
 
     def on_cam_real_capture_btn():
-        send_hex_bytes(cam_on_raw)
-        set_ack_state("await", "Real Camera Capture", "Triggering UART2 0xCA capture of 2 photos to flash")
+        send_hex_bytes(cam_cap_raw)
+        set_ack_state("await", "Real Camera Capture", "OBC handshakes 'MSN' & sends 0xCA to ADCS -> stores 2 real JPEGs in Flash CAM partition")
 
-    ttk.Button(c_row2, text="🧪 Dummy Camera (All 69 Chunks)", command=on_cam_dummy_btn).pack(side=tk.LEFT, padx=2)
-    ttk.Button(c_row2, text="📷 Real Camera Capture (UART2)", command=on_cam_real_capture_btn).pack(side=tk.LEFT, padx=3)
+    ttk.Button(c_row2, text="🧪 Dummy Camera Capture ('MSN'+'CAM' -> ADCS -> Flash)", command=on_cam_dummy_btn).pack(side=tk.LEFT, padx=2)
+    ttk.Button(c_row2, text="📷 Real Camera Capture ('MSN'+0xCA -> ADCS -> Flash)", command=on_cam_real_capture_btn).pack(side=tk.LEFT, padx=3)
     ttk.Button(c_row2, text="💾 Save Photo As...", command=save_camera_photo,
                style="Action.TButton").pack(side=tk.LEFT, padx=3)
     ttk.Button(c_row2, text="🖼️ Open Photo", command=open_photo_external).pack(side=tk.LEFT, padx=3)

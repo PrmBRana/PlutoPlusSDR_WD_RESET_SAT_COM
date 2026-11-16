@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/mount.h>
+#include <time.h>
 #include <nuttx/mutex.h>
 
 /*
@@ -357,4 +358,168 @@ void cam_rb_close_all_files(void)
         }
     }
   nxmutex_unlock(&g_cam_flash_lock);
+}
+
+/* ========================================================================= */
+/* HK Telemetry Ring Buffer -> Flash HK Partition (/mnt/hk) Consumer Helpers */
+/* ========================================================================= */
+
+static mutex_t  g_hk_flash_lock = NXMUTEX_INITIALIZER;
+static bool     g_hk_mounted    = false;
+static uint32_t g_hk_flash_seq  = 0;
+
+static uint16_t hk_flash_crc16(const uint8_t *buf, uint16_t len)
+{
+  uint16_t crc = 0xFFFFU;
+  for (uint16_t i = 0; i < len; i++)
+    {
+      crc ^= ((uint16_t)buf[i] << 8);
+      for (uint8_t b = 0; b < 8; b++)
+        {
+          crc = (crc & 0x8000U) ? ((crc << 1) ^ 0x1021U) : (crc << 1);
+        }
+    }
+  return crc;
+}
+
+int ensure_hk_partition_mounted(void)
+{
+  struct stat st;
+
+  if (g_hk_mounted && stat("/mnt/hk", &st) == 0)
+    {
+      return 0;
+    }
+
+  if (stat("/mnt/hk", &st) != 0)
+    {
+      mkdir("/mnt/hk", 0777);
+    }
+
+  int ret = mount("/dev/hk", "/mnt/hk", "littlefs", 0, "autoformat");
+  if (ret < 0)
+    {
+      int err = errno;
+      if (err == EBUSY || err == EEXIST || err == ENOTDIR)
+        {
+          g_hk_mounted = true;
+          return 0;
+        }
+
+      if (stat("/dev/hk", &st) == 0)
+        {
+          printf("[LITTLEFS HK] WARN: autoformat /dev/hk failed (errno=%d), trying forceformat...\n", err);
+          ret = mount("/dev/hk", "/mnt/hk", "littlefs", 0, "forceformat");
+          if (ret == 0 || errno == EBUSY || errno == EEXIST || errno == ENOTDIR)
+            {
+              g_hk_mounted = true;
+              return 0;
+            }
+          err = errno;
+        }
+      return -err;
+    }
+
+  g_hk_mounted = true;
+  return 0;
+}
+
+void hk_rb_drain_to_flash(void)
+{
+  struct telemetry_envelope_s env;
+  static struct adc1_packet_s s_cached_adc1;
+  static bool s_have_adc1 = false;
+
+  if (telemetry_rb_count() == 0)
+    {
+      return;
+    }
+
+  nxmutex_lock(&g_hk_flash_lock);
+  ensure_hk_partition_mounted();
+
+  while (telemetry_rb_read(&env) == 0)
+    {
+      if (env.footer == TELEM_FOOTER_ADC1)
+        {
+          s_cached_adc1 = env.pkt.adc1;
+          s_have_adc1 = true;
+        }
+      else if (env.footer == TELEM_FOOTER_ADC2)
+        {
+          const char *filename = "/mnt/hk/telemetry.bin";
+          uint8_t hk128[128];
+          memset(hk128, 0, sizeof(hk128));
+
+          if (s_have_adc1)
+            {
+              memcpy(&hk128[0], s_cached_adc1.data, 32);
+            }
+          hk128[32] = 0x55;
+          hk128[33] = 0xAA;
+
+          memcpy(&hk128[34], env.pkt.adc2.data, 24);
+          memcpy(&hk128[58], &env.pkt.adc2.gyro_x, 12);
+
+          hk128[70] = 0x66;
+          hk128[71] = 0xBB;
+
+          g_hk_flash_seq++;
+          struct timespec ts;
+          clock_gettime(CLOCK_MONOTONIC, &ts);
+          uint32_t now_ms = (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+
+          memcpy(&hk128[72], &g_hk_flash_seq, 4);
+          memcpy(&hk128[76], &now_ms, 4);
+
+          uint16_t crc = hk_flash_crc16(hk128, 124);
+          hk128[124] = (uint8_t)(crc & 0xFF);
+          hk128[125] = (uint8_t)(crc >> 8);
+
+          hk128[126] = 0xAA;
+          hk128[127] = 0xCC;
+
+          int fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0666);
+          if (fd < 0)
+            {
+              g_hk_mounted = false;
+              umount("/mnt/hk");
+              mount("/dev/hk", "/mnt/hk", "littlefs", 0, "forceformat");
+              g_hk_mounted = true;
+              fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0666);
+            }
+
+          if (fd >= 0)
+            {
+              ssize_t written = write(fd, hk128, sizeof(hk128));
+              fsync(fd);
+              close(fd);
+
+              if (written < 0)
+                {
+                  g_hk_mounted = false;
+                  umount("/mnt/hk");
+                  mount("/dev/hk", "/mnt/hk", "littlefs", 0, "forceformat");
+                  g_hk_mounted = true;
+                  fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0666);
+                  if (fd >= 0)
+                    {
+                      written = write(fd, hk128, sizeof(hk128));
+                      fsync(fd);
+                      close(fd);
+                    }
+                }
+
+              if (written == (ssize_t)sizeof(hk128))
+                {
+                  struct stat st;
+                  long fsz = (stat(filename, &st) == 0) ? (long)st.st_size : -1L;
+                  printf("[LITTLEFS HK] Stored 128B HK Record #%lu -> %s (File Size: %ld B, %ld Records)\n",
+                         (unsigned long)g_hk_flash_seq, filename, fsz, (fsz > 0) ? (fsz / 128) : 0L);
+                }
+            }
+        }
+    }
+
+  nxmutex_unlock(&g_hk_flash_lock);
 }

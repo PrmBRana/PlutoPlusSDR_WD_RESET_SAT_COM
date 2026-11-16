@@ -72,19 +72,9 @@ flash_M4 flash_m4 flash_cpu1 flash_CPU1: $(M4_DIR)/.config
 	  echo "$(M4_DIR)/nuttx.bin not found. Building NuttX..."; \
 	  $(MAKE) -C $(M4_DIR); \
 	fi
-	@if [ -x "$$(which $(STM32_PROG) 2>/dev/null)" ] || [ -x "$(STM32_PROG)" ]; then \
-	  echo "Flashing Satellite CPU1 (NuttX) to 0x08000000 using STM32_Programmer_CLI (CPU2 preserved)..."; \
-	  $(STM32_PROG) -c port=SWD mode=UR -w $(M4_DIR)/nuttx.bin 0x08000000 -v -hardRst 2>/dev/null || \
-	  $(STM32_PROG) -c port=SWD mode=HOTPLUG -w $(M4_DIR)/nuttx.bin 0x08000000 -v -hardRst 2>/dev/null || \
-	  $(STM32_PROG) -c port=SWD -w $(M4_DIR)/nuttx.bin 0x08000000 -v -hardRst || \
-	  (echo "STM32_Programmer_CLI failed. Trying OpenOCD fallback..." && \
-	  openocd -f interface/stlink.cfg -f target/stm32wlx.cfg -c "gdb_port disabled; tcl_port disabled; telnet_port disabled; init; halt; mww 0xE004203C 0x00001800; mww 0x40003000 0x0000AAAA; reg primask 1; mww 0x58004010 0x0000C3FB; mww 0x58004060 0x0000C3FB; flash write_image erase $(M4_DIR)/nuttx.bin 0x08000000 bin; verify_image $(M4_DIR)/nuttx.bin 0x08000000 bin; mww 0x58004000 [expr {[mrw 0x58004000] & ~0x10000}]; reset run; exit" 2>/dev/null || \
-	  openocd -f interface/stlink-dap.cfg -f target/stm32wlx.cfg -c "gdb_port disabled; tcl_port disabled; telnet_port disabled; init; halt; mww 0xE004203C 0x00001800; mww 0x40003000 0x0000AAAA; reg primask 1; mww 0x58004010 0x0000C3FB; mww 0x58004060 0x0000C3FB; flash write_image erase $(M4_DIR)/nuttx.bin 0x08000000 bin; verify_image $(M4_DIR)/nuttx.bin 0x08000000 bin; mww 0x58004000 [expr {[mrw 0x58004000] & ~0x10000}]; reset run; exit"); \
-	else \
-	  echo "Flashing Satellite CPU1 (NuttX) to 0x08000000 using OpenOCD (CPU2 preserved)..."; \
-	  openocd -f interface/stlink.cfg -f target/stm32wlx.cfg -c "gdb_port disabled; tcl_port disabled; telnet_port disabled; init; halt; mww 0xE004203C 0x00001800; mww 0x40003000 0x0000AAAA; reg primask 1; mww 0x58004010 0x0000C3FB; mww 0x58004060 0x0000C3FB; flash write_image erase $(M4_DIR)/nuttx.bin 0x08000000 bin; verify_image $(M4_DIR)/nuttx.bin 0x08000000 bin; mww 0x58004000 [expr {[mrw 0x58004000] & ~0x10000}]; reset run; exit" 2>/dev/null || \
-	  openocd -f interface/stlink-dap.cfg -f target/stm32wlx.cfg -c "gdb_port disabled; tcl_port disabled; telnet_port disabled; init; halt; mww 0xE004203C 0x00001800; mww 0x40003000 0x0000AAAA; reg primask 1; mww 0x58004010 0x0000C3FB; mww 0x58004060 0x0000C3FB; flash write_image erase $(M4_DIR)/nuttx.bin 0x08000000 bin; verify_image $(M4_DIR)/nuttx.bin 0x08000000 bin; mww 0x58004000 [expr {[mrw 0x58004000] & ~0x10000}]; reset run; exit"; \
-	fi
+	@echo "Flashing Satellite CPU1 (NuttX) to 0x08000000 using OpenOCD (CPU2 preserved)..."
+	@openocd -s /usr/share/openocd/scripts -f interface/stlink-dap.cfg -f target/stm32wlx.cfg -c "gdb_port disabled; tcl_port disabled; telnet_port disabled; init; halt; mww 0xE004203C 0x00001800; mww 0xE0042040 0x00001800; mww 0x40003000 0x0000AAAA; mww 0x58004010 0x0000C3FB; mww 0x58004060 0x0000C3FB; flash probe 0; flash erase_sector 0 0 74; halt; mww 0x40003000 0x0000AAAA; reg xpsr 0x01000000; reg msp 0x20004000; reg sp 0x20004000; reg primask 1; flash write_image $(M4_DIR)/nuttx.bin 0x08000000 bin; verify_image $(M4_DIR)/nuttx.bin 0x08000000 bin; mww 0x58004000 [expr {[mrw 0x58004000] & ~0x10000}]; mww 0x5800040C 0x00008000; reset run; exit" || \
+	openocd -s /usr/share/openocd/scripts -f interface/stlink.cfg -f target/stm32wlx.cfg -c "gdb_port disabled; tcl_port disabled; telnet_port disabled; init; halt; mww 0xE004203C 0x00001800; mww 0xE0042040 0x00001800; mww 0x40003000 0x0000AAAA; mww 0x58004010 0x0000C3FB; mww 0x58004060 0x0000C3FB; flash probe 0; flash erase_sector 0 0 74; halt; mww 0x40003000 0x0000AAAA; reg xpsr 0x01000000; reg msp 0x20004000; reg sp 0x20004000; reg primask 1; flash write_image $(M4_DIR)/nuttx.bin 0x08000000 bin; verify_image $(M4_DIR)/nuttx.bin 0x08000000 bin; mww 0x58004000 [expr {[mrw 0x58004000] & ~0x10000}]; mww 0x5800040C 0x00008000; reset run; exit"
 
 # ==========================================================================
 # 2. FLASH JC1 SATELLITE CORTEX-M0+ (JC1/cpu2: 0x08032000 - 0x0803FFFF)

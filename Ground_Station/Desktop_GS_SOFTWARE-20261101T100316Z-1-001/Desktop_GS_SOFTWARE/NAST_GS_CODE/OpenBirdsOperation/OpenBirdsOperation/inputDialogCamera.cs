@@ -42,7 +42,27 @@ namespace OpenBirdsOperation
             rTBox_cam_raw_data.AppendText(line + Environment.NewLine);
             rTBox_cam_raw_data.SelectionStart = rTBox_cam_raw_data.Text.Length;
             rTBox_cam_raw_data.ScrollToCaret();
+            if (line.IndexOf("\"type\":\"NACK\"", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                line.IndexOf("[SATELLITE-NACK]", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                groupBox1.Text = "Image Parser — REJECTED (NACK: Flash CAM Empty / Null Data)";
+                return;
+            }
             TryLiveRenderImage();
+        }
+
+        private static bool IsAllZeroOrAllFf(byte[] buf)
+        {
+            if (buf == null || buf.Length == 0) return true;
+            bool allZero = true;
+            bool allFf = true;
+            for (int i = 0; i < buf.Length; i++)
+            {
+                if (buf[i] != 0x00) allZero = false;
+                if (buf[i] != 0xFF) allFf = false;
+                if (!allZero && !allFf) return false;
+            }
+            return true;
         }
 
         public void TryLiveRenderImage()
@@ -79,8 +99,7 @@ namespace OpenBirdsOperation
         {
             if (formMain != null)
             {
-                rTBox_cam_raw_data.Text = "";
-                groupBox1.Text = "Image Parser — Requesting Dummy Image (69 Chunks / DC)...";
+                groupBox1.Text = "Image Parser — Capturing Dummy Image via ADCS ('MSN'+'CAM' -> Flash CAM)...";
                 formMain.TransmitDummyCameraCommand();
             }
         }
@@ -90,7 +109,7 @@ namespace OpenBirdsOperation
             if (formMain != null)
             {
                 rTBox_cam_raw_data.Text = "";
-                groupBox1.Text = "Image Parser — Requesting Real Camera Image (CAM)...";
+                groupBox1.Text = "Image Parser — Downlinking Image from Flash CAM (Real/Dummy)...";
                 formMain.TransmitRealCameraCommand();
             }
         }
@@ -99,7 +118,7 @@ namespace OpenBirdsOperation
         {
             if (formMain != null)
             {
-                groupBox1.Text = "Image Parser — Capturing Real Camera Photos to Flash (CAMON)...";
+                groupBox1.Text = "Image Parser — Capturing Real Camera via ADCS ('MSN'+0xCA -> Flash CAM)...";
                 formMain.TransmitRealCameraCaptureCommand();
             }
         }
@@ -206,7 +225,10 @@ namespace OpenBirdsOperation
                                 int p = int.Parse(mPkt.Groups[1].Value);
                                 pIdx = p > 0 ? p - 1 : 0;
                             }
-                            chunkDict[pIdx] = cBytes;
+                            if (!IsAllZeroOrAllFf(cBytes))
+                            {
+                                chunkDict[pIdx] = cBytes;
+                            }
                         }
                     }
                 }
@@ -272,7 +294,10 @@ namespace OpenBirdsOperation
                     {
                         byte[] chunkData = new byte[dlen];
                         Array.Copy(allBytes, i + 14, chunkData, 0, dlen);
-                        chunkDict[normIdx] = chunkData;
+                        if (!IsAllZeroOrAllFf(chunkData))
+                        {
+                            chunkDict[normIdx] = chunkData;
+                        }
                         i += 14 + dlen;
                         continue;
                     }
@@ -319,6 +344,11 @@ namespace OpenBirdsOperation
                         }
                     }
                     byte[] assembled = ms.ToArray();
+                    if (IsAllZeroOrAllFf(assembled))
+                    {
+                        chunksFound = 0;
+                        return null;
+                    }
 
                     // Find SOI (FFD8) and EOI (FFD9)
                     int soi = -1, eoi = -1;
@@ -351,6 +381,10 @@ namespace OpenBirdsOperation
             }
 
             // 6. Fallback for raw FFD8 ... FFD9 streams
+            if (IsAllZeroOrAllFf(allBytes))
+            {
+                return null;
+            }
             int fSoi = -1, fEoi = -1;
             for (int k = 0; k < allBytes.Length - 1; k++)
             {

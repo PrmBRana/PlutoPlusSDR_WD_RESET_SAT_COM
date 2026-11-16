@@ -54,4 +54,7 @@ int  ensure_camera_partition_mounted(void);
 void cam_rb_drain_to_flash(void);
 void cam_rb_close_all_files(void);
 
+int  ensure_hk_partition_mounted(void);
+void hk_rb_drain_to_flash(void);
+
 #endif /* RING_BUFFER_H */

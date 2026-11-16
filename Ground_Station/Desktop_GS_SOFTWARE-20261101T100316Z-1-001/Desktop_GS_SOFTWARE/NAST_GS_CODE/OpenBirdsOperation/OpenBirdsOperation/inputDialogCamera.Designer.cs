@@ -203,7 +203,7 @@ namespace OpenBirdsOperation
             this.btn_tx_capture_cam.Name = "btn_tx_capture_cam";
             this.btn_tx_capture_cam.Size = new System.Drawing.Size(90, 26);
             this.btn_tx_capture_cam.TabIndex = 13;
-            this.btn_tx_capture_cam.Text = "Capture (CAMON)";
+            this.btn_tx_capture_cam.Text = "Real Cap (CAMON)";
             this.btn_tx_capture_cam.UseVisualStyleBackColor = false;
             this.btn_tx_capture_cam.Click += new System.EventHandler(this.btn_tx_capture_cam_Click);
             // 
@@ -218,7 +218,7 @@ namespace OpenBirdsOperation
             this.btn_tx_real_cam.Name = "btn_tx_real_cam";
             this.btn_tx_real_cam.Size = new System.Drawing.Size(90, 27);
             this.btn_tx_real_cam.TabIndex = 12;
-            this.btn_tx_real_cam.Text = "TX Cam (CAM)";
+            this.btn_tx_real_cam.Text = "Downlink (CAM)";
             this.btn_tx_real_cam.UseVisualStyleBackColor = false;
             this.btn_tx_real_cam.Click += new System.EventHandler(this.btn_tx_real_cam_Click);
             // 
@@ -233,7 +233,7 @@ namespace OpenBirdsOperation
             this.btn_tx_dummy_cam.Name = "btn_tx_dummy_cam";
             this.btn_tx_dummy_cam.Size = new System.Drawing.Size(94, 45);
             this.btn_tx_dummy_cam.TabIndex = 11;
-            this.btn_tx_dummy_cam.Text = "TX Dummy (DC)";
+            this.btn_tx_dummy_cam.Text = "Dummy Cap (DC)";
             this.btn_tx_dummy_cam.UseVisualStyleBackColor = false;
             this.btn_tx_dummy_cam.Click += new System.EventHandler(this.btn_tx_dummy_cam_Click);
             // 

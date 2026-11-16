@@ -109,6 +109,12 @@ namespace OpenBirdsOperation
             rTBox_hk_raw_data.AppendText(line + Environment.NewLine);
             rTBox_hk_raw_data.SelectionStart = rTBox_hk_raw_data.Text.Length;
             rTBox_hk_raw_data.ScrollToCaret();
+            if (line.IndexOf("\"type\":\"NACK\"", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                line.IndexOf("[SATELLITE-NACK]", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                this.Text = "House Keeping Data — REJECTED (NACK: Flash HK Empty / Null Data)";
+                return;
+            }
             button_ver_hk.Enabled = true;
             button_hk_parser_ok.Enabled = true;
             UpdateHkTitleSummary();
@@ -354,6 +360,17 @@ namespace OpenBirdsOperation
         public static HKDecodedPacket DecodeSingleHKPayload(byte[] raw)
         {
             if (raw == null || raw.Length < 128) return null;
+
+            // Reject null/blank flash reads (all 0x00 or all 0xFF)
+            bool allZero = true;
+            bool allFf = true;
+            for (int b = 0; b < 128; b++)
+            {
+                if (raw[b] != 0x00) allZero = false;
+                if (raw[b] != 0xFF) allFf = false;
+                if (!allZero && !allFf) break;
+            }
+            if (allZero || allFf) return null;
 
             var pkt = new HKDecodedPacket();
             pkt.RawBytes = raw;

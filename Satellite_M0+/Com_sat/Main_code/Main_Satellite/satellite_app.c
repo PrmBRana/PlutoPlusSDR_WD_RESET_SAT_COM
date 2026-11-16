@@ -1504,14 +1504,11 @@ void Satellite_Handle_Flash_Read(
         flash_req_send(start_addr, num_pkts);
     }
 
-    static const uint32_t CHUNK_TIMEOUT_MS = 60U;
+    static const uint32_t CHUNK_TIMEOUT_MS = 4000U;
     bool ipc_active = (SHARED_FLASH_DATA->magic == FLASH_DATA_MAGIC);
 
     for (uint16_t p = 0; p < num_pkts; p++)
     {
-        uint32_t this_addr = start_addr + (uint32_t)p * FLASH_DATA_LEN;
-        uint8_t  stub[FLASH_DATA_LEN];
-
         if (ipc_active)
         {
             struct flash_chunk_s chunk;
@@ -1529,8 +1526,8 @@ void Satellite_Handle_Flash_Read(
                     }
                     break;
                 }
-                CPU2_Delay_Ms(2);
-                waited_ms += 2;
+                CPU2_Delay_Ms(5);
+                waited_ms += 5;
             }
 
             if (got_chunk)
@@ -1542,69 +1539,9 @@ void Satellite_Handle_Flash_Read(
                     chunk.data);
                 continue;
             }
-            uart1_puts("[M0+ FLASH] IPC timeout waiting for M4 chunk\r\n");
+            uart1_puts("[M0+ FLASH] IPC timeout waiting for M4 chunk -> stopping!\r\n");
+            break;
         }
-
-        /* Pack structured HEX payload containing ADC1 + ADC2 with IMU between header and footer */
-        memset(stub, 0, FLASH_DATA_LEN);
-        int16_t *s1_16 = (int16_t *)&stub[0];
-        /* ADC 1: 16 Channels (Voltages & Signed Temperatures) */
-        s1_16[0]  = (int16_t)385;  /* Bat V  3.85V x100 */
-        s1_16[1]  = (int16_t)492;  /* Solar V 4.92V x100 */
-        s1_16[2]  = (int16_t)330;  /* Bus V 3.30V x100 */
-        s1_16[3]  = (int16_t)490;  /* SP5 V 4.90V */
-        s1_16[4]  = (int16_t)488;  /* SP4 V 4.88V */
-        s1_16[5]  = (int16_t)491;  /* SP3 V 4.91V */
-        s1_16[6]  = (int16_t)493;  /* SP1 V 4.93V */
-        s1_16[7]  = (int16_t)490;  /* SP2 V 4.90V */
-        s1_16[8]  = (int16_t)0;    /* Ant Temp 0.0 C (signed) */
-        s1_16[9]  = (int16_t)215;  /* Bat Temp +21.5 C (signed) */
-        s1_16[10] = (int16_t)220;  /* BPB Temp +22.0 C (signed) */
-        s1_16[11] = (int16_t)250;  /* Temp 1 */
-        s1_16[12] = (int16_t)250;  /* Temp 5 */
-        s1_16[13] = (int16_t)250;  /* Temp 4 */
-        s1_16[14] = (int16_t)250;  /* Temp 3 */
-        s1_16[15] = (int16_t)250;  /* Temp 2 */
-        /* Footer 1: 0xAA55 */
-        stub[32] = 0x55;
-        stub[33] = 0xAA;
-
-        /* ADC 2: 12 Channels (Currents, signed/unsigned) */
-        int16_t *s2_16 = (int16_t *)&stub[34];
-        s2_16[0]  = (int16_t)45;   /* Unreg I 0.45A */
-        s2_16[1]  = (int16_t)120;  /* 3V3 Main I 1.20A */
-        s2_16[2]  = (int16_t)18;   /* 5V Rail I 0.18A */
-        s2_16[3]  = (int16_t)-35;  /* Bat I -0.35A (signed discharge) */
-        s2_16[4]  = (int16_t)15;   /* SP1 Current */
-        s2_16[5]  = (int16_t)15;   /* SP2 Current */
-        s2_16[6]  = (int16_t)15;   /* SP3 Current */
-        s2_16[7]  = (int16_t)15;   /* SP4 Current */
-        s2_16[8]  = (int16_t)15;   /* SP5 Current */
-        s2_16[9]  = (int16_t)85;   /* Raw Bus Current */
-        s2_16[10] = (int16_t)1;    /* Flag 1 */
-        s2_16[11] = (int16_t)0;    /* Flag 2 */
-
-        /* IMU: 6 Channels (3-Axis Gyro & 3-Axis Mag, signed!) */
-        int16_t *imu16 = (int16_t *)&stub[58];
-        imu16[0]  = (int16_t)-12;  /* Gyro X: -12 c-dps (signed) */
-        imu16[1]  = (int16_t)24;   /* Gyro Y: +24 c-dps (signed) */
-        imu16[2]  = (int16_t)8;    /* Gyro Z: +8 c-dps (signed) */
-        imu16[3]  = (int16_t)320;  /* Mag X: +320 uT (signed) */
-        imu16[4]  = (int16_t)110;  /* Mag Y: +110 uT (signed) */
-        imu16[5]  = (int16_t)-450; /* Mag Z: -450 uT (signed) */
-
-        /* Footer 2: 0xBB66 */
-        stub[70] = 0x66;
-        stub[71] = 0xBB;
-
-        /* Packet Data Footer: 0xAA 0xCC at end of 128B */
-        stub[126] = 0xAA;
-        stub[127] = 0xCC;
-
-        Satellite_Send_Flash_Chunk(
-            p, num_pkts, this_addr,
-            ipc_active ? 3U : 0U,
-            stub);
     }
 
     Satellite_GMSK_Stop();
