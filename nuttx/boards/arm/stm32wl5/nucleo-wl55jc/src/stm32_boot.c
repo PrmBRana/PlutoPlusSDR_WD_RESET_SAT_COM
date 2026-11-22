@@ -146,47 +146,59 @@ static int stm32wl5_mt25q_initialize(void)
 
   syslog(LOG_INFO, "MT25Q MTD initialized successfully\n");
 
-    /* Now initialize the MTD partitions */
-  #ifdef CONFIG_MTD_PARTITION
+  /* Now initialize the MTD partitions (128 MB MT25QL01G) */
+#ifdef CONFIG_MTD_PARTITION
   /* MT25Q Page size is 256 bytes (1 MTD block = 256 bytes) */
-  #define MTD_BLOCK_SIZE      256
+  #define MTD_BLOCK_SIZE      256U
 
-  /* DIE 0: Unified Housekeeping (HK) - 64 MB (ADC1, ADC2, IMU) */
-  #define HK_START_ADDR        0x00000000
-  #define HK_SIZE              (64 * 1024 * 1024) /* 64 MB = 67,108,864 bytes */
-  #define HK_START_BLOCK       (HK_START_ADDR / MTD_BLOCK_SIZE) /* Block 0 */
-  #define HK_NUM_BLOCKS        (HK_SIZE / MTD_BLOCK_SIZE)       /* 262144 blocks */
+  static const struct
+  {
+    const char *dev_path;
+    const char *label;
+    uint32_t    start_addr;
+    uint32_t    size_bytes;
+  } g_mt25q_parts[] =
+  {
+    { "/dev/hk1",       "HK_1 (ADC1 & ADC2)",    0x00000000U, 32U * 1024U * 1024U },
+    { "/dev/hk2",       "HK_2 (Mag & Gyro)",     0x02000000U, 32U * 1024U * 1024U },
+    { "/dev/adcs",      "ADCS MSN",              0x04000000U,  8U * 1024U * 1024U },
+    { "/dev/cam_rgb",   "CAM RGB MSN",           0x04800000U, 16U * 1024U * 1024U },
+    { "/dev/cam_nir",   "CAM NIR MSN",           0x05800000U, 16U * 1024U * 1024U },
+    { "/dev/epdm",      "EPDM MSN",              0x06800000U,  8U * 1024U * 1024U },
+    { "/dev/dpm",       "DP-M MSN",              0x07000000U,  8U * 1024U * 1024U },
+    { "/dev/rsv_table", "RSV_Table",             0x07800000U,  2U * 1024U * 1024U },
+    { "/dev/imp_flags", "Important Flags",       0x07A00000U,  2U * 1024U * 1024U },
+    { "/dev/part_size", "All Partition File Size", 0x07C00000U, 2U * 1024U * 1024U },
+    { "/dev/seek_ptr",  "Seek_Pointer",          0x07E00000U,  2U * 1024U * 1024U },
+  };
 
-  /* DIE 1: Camera Images - 64 MB */
-  #define CAM_START_ADDR       0x04000000                       /* 64 MB offset */
-  #define CAM_SIZE             (64 * 1024 * 1024)
-  #define CAM_START_BLOCK      (CAM_START_ADDR / MTD_BLOCK_SIZE) /* Block 262144 */
-  #define CAM_NUM_BLOCKS       (CAM_SIZE / MTD_BLOCK_SIZE)       /* 262144 blocks */
-
-  struct mtd_dev_s *part_hk;
-  struct mtd_dev_s *part_cam;
-
-  /* 1. Register Die 0 as /dev/hk (Full 64 MB) */
-  part_hk = mtd_partition(mtd, HK_START_BLOCK, HK_NUM_BLOCKS);
-  if (part_hk != NULL)
+  printf("MT25Q Flash Partitions (Total 128 MB):\n");
+  for (size_t i = 0; i < sizeof(g_mt25q_parts) / sizeof(g_mt25q_parts[0]); i++)
     {
-      register_mtddriver("/dev/hk", part_hk, 0666, NULL);
-      syslog(LOG_INFO, "Registered /dev/hk (64 MB - Die 0)\n");
-    }
+      uint32_t start_blk = g_mt25q_parts[i].start_addr / MTD_BLOCK_SIZE;
+      uint32_t num_blks  = g_mt25q_parts[i].size_bytes / MTD_BLOCK_SIZE;
+      struct mtd_dev_s *part = mtd_partition(mtd, start_blk, num_blks);
+      if (part != NULL)
+        {
+          register_mtddriver(g_mt25q_parts[i].dev_path, part, 0666, NULL);
+          syslog(LOG_INFO, "Registered %s (%s, %lu MB @ 0x%08lX)\n",
+                 g_mt25q_parts[i].dev_path, g_mt25q_parts[i].label,
+                 (unsigned long)(g_mt25q_parts[i].size_bytes / (1024U * 1024U)),
+                 (unsigned long)g_mt25q_parts[i].start_addr);
+        }
+      else
+        {
+          syslog(LOG_ERR, "ERROR: mtd_partition failed for %s\n",
+                 g_mt25q_parts[i].dev_path);
+        }
 
-  /* 2. Register Die 1 as /dev/camera (Full 64 MB) */
-  part_cam = mtd_partition(mtd, CAM_START_BLOCK, CAM_NUM_BLOCKS);
-  if (part_cam != NULL)
-    {
-      register_mtddriver("/dev/camera", part_cam, 0666, NULL);
-      syslog(LOG_INFO, "Registered /dev/camera (64 MB - Die 1)\n");
+      printf("  %-14s %-24s Addr=0x%08lX Blk=%6lu..%6lu (%2lu MB)\n",
+             g_mt25q_parts[i].dev_path, g_mt25q_parts[i].label,
+             (unsigned long)g_mt25q_parts[i].start_addr,
+             (unsigned long)start_blk,
+             (unsigned long)(start_blk + num_blks - 1U),
+             (unsigned long)(g_mt25q_parts[i].size_bytes / (1024U * 1024U)));
     }
-
-  printf("MT25Q Flash Partitions:\n");
-  printf("  /dev/hk:     Start Block: %d, Num Blocks: %d (Size: %d MB)\n",
-         HK_START_BLOCK, HK_NUM_BLOCKS, HK_SIZE / (1024 * 1024));
-  printf("  /dev/camera: Start Block: %d, Num Blocks: %d (Size: %d MB)\n",
-         CAM_START_BLOCK, CAM_NUM_BLOCKS, CAM_SIZE / (1024 * 1024));
 #endif
 
   return OK;
@@ -362,6 +374,14 @@ static bool stm32wl5_cpu2_image_present(void)
 void board_late_initialize(void)
 {
   int ret;
+
+#if defined(CONFIG_ARCH_BOARD_ENABLE_CPU2)
+  /* Pre-enable CPU2 peripheral clocks (IPCC, FLASH, HSEM, GPIOA/B/C) early
+   * so CPU2 never HardFaults on unclocked GPIO/IPCC if already active on reset.
+   */
+  modifyreg32(0x58000150, 0, (1 << 20) | (1 << 25) | (1 << 19)); /* C2AHB3ENR */
+  modifyreg32(0x5800014c, 0, (1 << 0) | (1 << 1) | (1 << 2));   /* C2AHB2ENR */
+#endif
 
 #if defined(CONFIG_STM32WL5_SPI1) || defined(CONFIG_STM32WL5_SPI2S2)
   stm32wl5_spidev_initialize();

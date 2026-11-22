@@ -253,18 +253,13 @@ STM32_PROG ?= $(shell which STM32_Programmer_CLI 2>/dev/null || \
 # CPU1 / Cortex-M4 at 0x08000000 (sectors 0-99) is strictly preserved!
 # ==========================================================================
 
-flash: $(TARGET).bin
+flash_M0: $(TARGET).bin
 	@echo "Flashing $(TARGET).bin to 0x08032000 using OpenOCD (CPU1 preserved)..."
 	@openocd -s /usr/share/openocd/scripts -f interface/stlink-dap.cfg -f target/stm32wlx.cfg -c "gdb_port disabled; tcl_port disabled; telnet_port disabled; init; halt; mww 0xE004203C 0x00001800; mww 0xE0042040 0x00001800; mww 0x40003000 0x0000AAAA; mww 0x58004010 0x0000C3FB; mww 0x58004060 0x0000C3FB; flash probe 0; flash erase_sector 0 100 127; halt; mww 0x40003000 0x0000AAAA; reg xpsr 0x01000000; reg msp 0x20004000; reg sp 0x20004000; reg primask 1; flash write_image $(TARGET).bin 0x08032000 bin; verify_image $(TARGET).bin 0x08032000 bin; mww 0x58004000 [expr {[mrw 0x58004000] & ~0x10000}]; mww 0x5800040C 0x00008000; reset run; exit" || \
 	openocd -s /usr/share/openocd/scripts -f interface/stlink.cfg -f target/stm32wlx.cfg -c "gdb_port disabled; tcl_port disabled; telnet_port disabled; init; halt; mww 0xE004203C 0x00001800; mww 0xE0042040 0x00001800; mww 0x40003000 0x0000AAAA; mww 0x58004010 0x0000C3FB; mww 0x58004060 0x0000C3FB; flash probe 0; flash erase_sector 0 100 127; halt; mww 0x40003000 0x0000AAAA; reg xpsr 0x01000000; reg msp 0x20004000; reg sp 0x20004000; reg primask 1; flash write_image $(TARGET).bin 0x08032000 bin; verify_image $(TARGET).bin 0x08032000 bin; mww 0x58004000 [expr {[mrw 0x58004000] & ~0x10000}]; mww 0x5800040C 0x00008000; reset run; exit"
 
 
 sat SAT: $(TARGET).bin
-
-flashsatM0 flash_satM0 flashsat flash_sat flash_SAT flash_m0 flash_M0 flash_cpu2 flash_CPU2: flash
-
-flash_gs flash_GS:
-	$(MAKE) -C ../../Ground_Station flash_gs
 
 
 # ==========================================================================
@@ -297,4 +292,4 @@ clean:
 	find . -path "./V1.4" -prune -o -type f \( -name "*.o" -o -name "*.d" \) -exec rm -f {} +
 
 
-.PHONY: all flash sat SAT flashsatM0 flash_satM0 flashsat flash_sat flash_SAT flash_m0 flash_M0 flash_cpu2 flash_CPU2 size clean
+.PHONY: all flash_M0 sat SAT size clean

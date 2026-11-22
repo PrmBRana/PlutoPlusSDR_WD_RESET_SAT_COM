@@ -77,7 +77,7 @@ namespace OpenBirdsOperation
             this.groupBoxStatus.Size = new System.Drawing.Size(860, 115);
             this.groupBoxStatus.TabIndex = 0;
             this.groupBoxStatus.TabStop = false;
-            this.groupBoxStatus.Text = "CW DECODER 435.000 MHz (Slipper2Sat / 9NS2S2)";
+            this.groupBoxStatus.Text = "CW DECODER 437.375 MHz (Slipper2Sat / 9NS2S2)";
             // 
             // lblState
             // 

@@ -9,8 +9,8 @@ Location: Ground_Station/gs_communicator.py (portable — run from any clone of 
 Talks to Ground Station firmware (gs_app.c / gs_main.c) over UART2 / ST-LINK VCP (115200 8N1).
 
 Key Operational Features:
-- DOWNLINK RX: 435.000 MHz (4800 bps GMSK AX.25 UI frames)
-- UPLINK TX:   437.375 MHz (13-Byte Telecommands: HK requests, Camera trigger, Flash downloads)
+- DOWNLINK RX: 437.375 MHz (4800 bps GMSK AX.25 UI frames)
+- UPLINK TX:   435.313 MHz (13-Byte Telecommands: HK requests, Camera trigger, Flash downloads)
 - LIGHT THEME: Crisp modern aerospace interface (white/slate palette)
 - DEDICATED TABS:
     1. GMSK Uplink Commands (Send arbitrary number of flash packets, HK requests, ACK monitor)
@@ -167,8 +167,8 @@ APP_TITLE = "S2S-2 / NEPSAT Ground Station Console"
 SAT_CALLSIGN = "9NS2S2"
 GS_CALLSIGN = "GROUND"
 
-RX_FREQ_STR = "435.000 MHz (Downlink)"
-TX_FREQ_STR = "437.375 MHz (Uplink)"
+RX_FREQ_STR = "437.375 MHz (Downlink)"
+TX_FREQ_STR = "435.313 MHz (Uplink)"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGO_PATH = os.path.join(SCRIPT_DIR, "antarikshya_logo.png")
@@ -180,15 +180,23 @@ FLASH_DUMP_FILE = os.path.join(SCRIPT_DIR, "downloaded_flash_data.bin")
 EXCEL_EXPORT_PATH = os.path.join(SCRIPT_DIR, "ground_station_telemetry.xlsx")
 
 # Firmware opcodes (strictly matching Packet Format.xlsx and firmware)
-OPCODE_CAM_DOWN      = bytes([0x1D, 0xD2, 0xF5])  # cam.txt download (MCU 0x01)
-OPCODE_HK            = bytes([0x1D, 0xD1, 0xF2])  # sat_health.txt / HK download (MCU 0x01)
+OPCODE_CAM_DOWN      = bytes([0x1D, 0xD2, 0xF5])  # CAM RGB download (MCU 0x01)
+OPCODE_CAM_NIR_DOWN  = bytes([0x1D, 0xD2, 0xF6])  # CAM NIR download (MCU 0x01)
+OPCODE_EPDM_DOWN     = bytes([0x1D, 0xD2, 0xF7])  # EPDM download (MCU 0x01)
+OPCODE_ADCS_DOWN     = bytes([0x1D, 0xD2, 0xF8])  # ADCS download (MCU 0x01)
+OPCODE_HK            = bytes([0x1D, 0xD1, 0xF2])  # HK_1 (ADC1/ADC2) download (MCU 0x01)
+OPCODE_HK2           = bytes([0x1D, 0xD1, 0xF3])  # HK_2 (Mag/Gyro) download (MCU 0x01)
+OPCODE_RSV_TABLE     = bytes([0x1D, 0xD1, 0xF4])  # RSV_Table download (MCU 0x01)
 OPCODE_FLASH         = bytes([0x1D, 0xD1, 0xF8])  # Raw Flash storage download (MCU 0x01)
-OPCODE_CAM_REAL_DOWN = bytes([0xCC, 0x5E, 0xBD])  # Real camera data downlink (MCU 0x04)
-OPCODE_CAM_ON        = bytes([0xCC, 0x5E, 0xBD])  # Real camera data downlink (MCU 0x04)
+OPCODE_CLEAR_FLASH1  = bytes([0xFF, 0xBE, 0xCC])  # Clear Flash 1 (HK) (MCU 0x01)
+OPCODE_CLEAR_FLASH2  = bytes([0xFF, 0xBE, 0xDD])  # Clear Flash 2 (CAM) (MCU 0x01)
+OPCODE_ERASE_ALL     = bytes([0xFF, 0xBE, 0xAA])  # Erase All External Flash (MCU 0x01)
+OPCODE_CAM_REAL_DOWN = bytes([0xCC, 0x5E, 0xBD])  # Run Camera / ADCS Mission (MCU 0x04)
+OPCODE_CAM_ON        = bytes([0xCC, 0x5E, 0xBD])  # Run Camera / ADCS Mission (MCU 0x04)
 OPCODE_CAM_DUMMY     = bytes([0xCC, 0x5E, 0xBE])  # Dummy camera test (MCU 0x04)
-OPCODE_CAM_CAP       = bytes([0xCC, 0x5E, 0xBC])  # Real camera capture mission (MCU 0x04)
-OPCODE_ADCS          = bytes([0xA0, 0x53, 0xCF])  # ADCS mission (MCU 0x03)
-OPCODE_EPDM          = bytes([0xEC, 0xCF, 0xCF])  # EPDM mission (MCU 0x05)
+OPCODE_CAM_CAP       = bytes([0xCC, 0x5E, 0xBD])  # Run Camera / ADCS Mission (MCU 0x04)
+OPCODE_ADCS          = bytes([0xCC, 0x5E, 0xBD])  # Run ADCS Mission (MCU 0x04)
+OPCODE_EPDM          = bytes([0xCC, 0x5E, 0xBD])  # Run EPDM Mission (MCU 0x05)
 
 MCU_ID_OBC  = 0x01
 MCU_ID_ADCS = 0x03
@@ -1455,7 +1463,7 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
 
     cw_row1 = tk.Frame(cw_frame, bg="#0F172A")
     cw_row1.pack(fill=tk.X)
-    tk.Label(cw_row1, text="CW DECODE  435.000 MHz", bg="#0F172A", fg="#38BDF8",
+    tk.Label(cw_row1, text="CW DECODE  437.375 MHz", bg="#0F172A", fg="#38BDF8",
              font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(0, 12))
     cw_state_var = tk.StringVar(value="IDLE")
     cw_state_lbl = tk.Label(cw_row1, textvariable=cw_state_var, bg="#334155",
@@ -1670,14 +1678,22 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
              font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=4)
 
     target_options = {
-        "📊 sat_health.txt (HK Telemetry) - Opcode 1D D1 F2": (MCU_ID_OBC, OPCODE_HK, 0x0000),
-        "💾 raw_flash.bin (Flash Storage) - Opcode 1D D1 F8": (MCU_ID_OBC, OPCODE_FLASH, 0x0000),
-        "📷 Camera Data Downlink (Real & Dummy Flash CAM) - Opcode CC 5E BD": (MCU_ID_CAM, OPCODE_CAM_REAL_DOWN, 0x0000),
-        "📷 cam.txt (Legacy OBC Download) - Opcode 1D D2 F5": (MCU_ID_OBC, OPCODE_CAM_DOWN, 0x0000),
+        "📊 HK_1 (ADC1 & ADC2) [32MB @ 0x00000000] - 1D D1 F2": (MCU_ID_OBC, OPCODE_HK, 0x0000, 0x00000000),
+        "🧭 HK_2 (Mag & Gyro) [32MB @ 0x02000000] - 1D D1 F3": (MCU_ID_OBC, OPCODE_HK2, 0x0000, 0x02000000),
+        "🛰️ ADCS MSN [8MB @ 0x04000000] - 1D D2 F8": (MCU_ID_OBC, OPCODE_ADCS_DOWN, 0x0000, 0x04000000),
+        "📷 CAM RGB MSN [16MB @ 0x04800000] - 1D D2 F5": (MCU_ID_OBC, OPCODE_CAM_DOWN, 0x0000, 0x04800000),
+        "📷 CAM NIR MSN [16MB @ 0x05800000] - 1D D2 F6": (MCU_ID_OBC, OPCODE_CAM_NIR_DOWN, 0x0000, 0x05800000),
+        "🔬 EPDM MSN [8MB @ 0x06800000] - 1D D2 F7": (MCU_ID_OBC, OPCODE_EPDM_DOWN, 0x0000, 0x06800000),
+        "📡 DP-M MSN [8MB @ 0x07000000] - 1D D1 F8": (MCU_ID_OBC, OPCODE_FLASH, 0x0000, 0x07000000),
+        "📋 RSV_Table [2MB @ 0x07800000] - 1D D1 F4": (MCU_ID_OBC, OPCODE_RSV_TABLE, 0x0000, 0x07800000),
+        "🚩 Important Flags [2MB @ 0x07A00000] - 1D D1 F8": (MCU_ID_OBC, OPCODE_FLASH, 0x0000, 0x07A00000),
+        "📏 All Partition File Size [2MB @ 0x07C00000] - 1D D1 F8": (MCU_ID_OBC, OPCODE_FLASH, 0x0000, 0x07C00000),
+        "📍 Seek_Pointer [2MB @ 0x07E00000] - 1D D1 F8": (MCU_ID_OBC, OPCODE_FLASH, 0x0000, 0x07E00000),
+        "📷 Camera Data Downlink (CAM) - CC 5E BD": (MCU_ID_CAM, OPCODE_CAM_REAL_DOWN, 0x0000, 0x04800000),
     }
-    target_var = tk.StringVar(value="📊 sat_health.txt (HK Telemetry) - Opcode 1D D1 F2")
+    target_var = tk.StringVar(value="📊 HK_1 (ADC1 & ADC2) [32MB @ 0x00000000] - 1D D1 F2")
     target_combo = ttk.Combobox(target_row, textvariable=target_var,
-                                values=list(target_options.keys()), state="readonly", width=48)
+                                values=list(target_options.keys()), state="readonly", width=52)
     target_combo.pack(side=tk.LEFT, padx=4)
 
     f_inputs = tk.Frame(flash_cmd_box, bg="#FFFFFF")
@@ -1727,8 +1743,8 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
                 f"Range: 0x{addr:08X} - 0x{end_addr:08X}")
 
             t_val = target_var.get()
-            mcu_id, opcode, data_id = target_options.get(
-                t_val, (MCU_ID_OBC, OPCODE_HK, 0x0000))
+            mcu_id, opcode, data_id, _ = target_options.get(
+                t_val, (MCU_ID_OBC, OPCODE_HK, 0x0000, 0x00000000))
             hex_str, _ = build_telecommand_hex(
                 mcu_id, opcode, data_id, addr, pkts)
             hex_preview_var.set(f"HEX: {hex_str}")
@@ -1736,6 +1752,13 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
             calc_info_var.set("Invalid Address or Packet count")
             hex_preview_var.set("HEX: (invalid)")
 
+    def on_target_selected(event=None):
+        t_val = target_var.get()
+        if t_val in target_options:
+            _, _, _, default_addr = target_options[t_val]
+            addr_var.set(f"0x{default_addr:08X}")
+
+    target_combo.bind("<<ComboboxSelected>>", on_target_selected)
     target_var.trace_add("write", update_flash_cmd_preview)
     addr_var.trace_add("write", update_flash_cmd_preview)
     pkts_var.trace_add("write", update_flash_cmd_preview)
@@ -1753,13 +1776,13 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
                 pkts = 65535
 
             t_val = target_var.get()
-            mcu_id, opcode, data_id = target_options.get(
-                t_val, (MCU_ID_OBC, OPCODE_HK, 0x0000))
+            mcu_id, opcode, data_id, _ = target_options.get(
+                t_val, (MCU_ID_OBC, OPCODE_HK, 0x0000, 0x00000000))
 
             if "cam" in t_val.lower():
                 state["current_mission_type"] = "REAL_CAMERA"
                 state["cam_bytes"] = bytearray()
-            elif "sat_health" in t_val.lower() or "hk" in t_val.lower():
+            elif "hk" in t_val.lower():
                 state["current_mission_type"] = "HK"
             else:
                 state["current_mission_type"] = "FLASH"
@@ -1787,9 +1810,24 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
                command=lambda p=p_preset: pkts_var.set(str(p)),
                width=7).pack(side=tk.LEFT, padx=2)
 
+    def on_erase_all_flash():
+        if not messagebox.askyesno(
+                "Confirm Erase All Flash",
+                "Erase ALL external flash partitions (HK, CAM, ADCS, EPDM, etc.)?\n"
+                "Command: 53 01 FF BE AA 00 00 00 00 00 00 00 00"):
+            return
+        _, raw = build_telecommand_hex(
+            MCU_ID_OBC, OPCODE_ERASE_ALL, 0x0000, 0x00000000, 0)
+        send_hex_bytes(raw)
+        set_ack_state("await", "Erase All Flash",
+                      "Sent Erase All Flash command (53 01 FF BE AA ...)")
+
+    ttk.Button(f_btn_row, text="🗑️ Erase All Flash",
+               command=on_erase_all_flash).pack(side=tk.RIGHT, padx=4)
+
     # --- Quick Mission Command Buttons ---
     quick_box = ttk.LabelFrame(
-        cmd_left, text=" Pre-Configured Satellite Telecommands (437.375 MHz) ")
+        cmd_left, text=" Pre-Configured Satellite Telecommands (435.313 MHz) ")
     quick_box.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
     def send_preset_cmd(name, hex_data, desc):
@@ -1843,9 +1881,9 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
     cam_down_hex, cam_down_raw = build_telecommand_hex(
         MCU_ID_OBC, OPCODE_CAM_DOWN, 0x0000, 0x00000000, 69)
     adcs_hex, adcs_raw = build_telecommand_hex(
-        MCU_ID_ADCS, OPCODE_ADCS, 0x0000, 0x00000000, 1)
+        MCU_ID_CAM, OPCODE_ADCS, 0x0000, 0x00000000, 0)
     epdm_hex, epdm_raw = build_telecommand_hex(
-        MCU_ID_EPDM, OPCODE_EPDM, 0x0000, 0x00000000, 1)
+        MCU_ID_EPDM, OPCODE_EPDM, 0x0000, 0x00000000, 0)
 
     preset_cmds = [
         ("📡 Ping Satellite OBC (Ping -> ACK)",
@@ -1856,21 +1894,19 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
          flash_raw, f"Flash read sent ({flash_hex})"),
         ("🧪 Dummy Camera Capture (53 04 CC 5E BE... -> OBC 'MSN' + 'CAM' to ADCS -> Flash CAM, NO downlink)",
          cam_dummy_raw, f"Dummy Camera Capture trigger sent ({cam_dummy_hex} -> 'MSN' + 'CAM' to ADCS -> Flash CAM)"),
-        ("📸 Real Camera Capture (53 04 CC 5E BC... -> OBC 'MSN' + 0xCA to ADCS -> Flash CAM, NO downlink)",
-         cam_cap_raw, f"Real Camera Capture trigger sent ({cam_cap_hex} -> 'MSN' + 0xCA to ADCS -> Flash CAM)"),
-        ("📷 Camera Data Downlink - Real & Dummy from Flash CAM (53 04 CC 5E BD 00 00 00 00 00 00 00 00)",
-         cam_real_down_raw, f"Camera Data Downlink sent ({cam_real_down_hex})"),
-        ("📥 Downlink Camera Photo Packets (Legacy Opcode 1D D2 F5)",
-         cam_down_raw, f"Camera photo download request sent ({cam_down_hex})"),
-        ("🧭 ADCS ON: Run ADCS Mission (Opcode A0 53 CF)",
-         adcs_raw, f"ADCS Mission trigger sent ({adcs_hex})"),
-        ("🔬 EPDM ON: Run EPDM Mission (Opcode EC CF CF)",
-         epdm_raw, f"EPDM Mission trigger sent ({epdm_hex})"),
+        ("📸 Real Camera Run (53 04 CC 5E BD 00 00 00 00 00 00 00 00)",
+         cam_cap_raw, f"Camera Run sent ({cam_cap_hex})"),
+        ("📥 Download Camera RGB (53 01 1D D2 F5 @ 0x04800000)",
+         cam_down_raw, f"Camera RGB download sent ({cam_down_hex})"),
+        ("🧭 ADCS Run (53 04 CC 5E BD 00 00 00 00 00 00 00 00)",
+         adcs_raw, f"ADCS Run sent ({adcs_hex})"),
+        ("🔬 EPDM Run (53 05 CC 5E BD 00 00 00 00 00 00 00 00)",
+         epdm_raw, f"EPDM Run sent ({epdm_hex})"),
         ("🌊 Request 50-Packet GMSK Burst Stream",
          "BURST", "Requesting 50-packet GMSK burst telemetry downlink"),
-        ("📶 Transmit Continuous Test Carrier @ 437.375 MHz (5s - SDR Test)",
+        ("📶 Transmit Continuous Test Carrier @ 435.313 MHz (5s - SDR Test)",
          "CARRIER 5",
-         "Transmitting test carrier on 437.375 MHz (+22 dBm RFO_HP) for 5 seconds"),
+         "Transmitting test carrier on 435.313 MHz (+22 dBm RFO_HP) for 5 seconds"),
         ("ℹ️ Query Ground Station Radio Status (Counters & Link)",
          None, "Querying GS firmware link counters"),
     ]
@@ -2100,7 +2136,7 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
     cam_paned = ttk.PanedWindow(tab_camera, orient=tk.HORIZONTAL)
     cam_paned.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
 
-    cam_left = ttk.LabelFrame(cam_paned, text=" Live photo from GS radio (GMSK 435.000 MHz, not SDR) ")
+    cam_left = ttk.LabelFrame(cam_paned, text=" Live photo from GS radio (GMSK 437.375 MHz, not SDR) ")
     cam_paned.add(cam_left, weight=3)
 
     cam_right = ttk.Frame(cam_paned)
@@ -2109,7 +2145,7 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
     cam_canvas = tk.Canvas(cam_left, bg="#0F172A", highlightthickness=0)
     cam_canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=(8, 4))
     cam_canvas.create_text(
-        240, 160, text="Waiting for GMSK camera chunks from this GS radio\n(435.000 MHz AX.25 / G3RUH — not SDR)",
+        240, 160, text="Waiting for GMSK camera chunks from this GS radio\n(437.375 MHz AX.25 / G3RUH — not SDR)",
         fill="#94A3B8", font=("Segoe UI", 11), justify=tk.CENTER)
 
     cam_left_btns = tk.Frame(cam_left, bg="#FFFFFF")
@@ -2441,12 +2477,12 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
             cell.config(bg="#E2E8F0", fg="#475569")
         cam_canvas.delete("all")
         cam_canvas.create_text(
-            240, 160, text="Waiting for GMSK camera chunks from this GS radio\n(435.000 MHz AX.25 / G3RUH — not SDR)",
+            240, 160, text="Waiting for GMSK camera chunks from this GS radio\n(437.375 MHz AX.25 / G3RUH — not SDR)",
             fill="#94A3B8", font=("Segoe UI", 11), justify=tk.CENTER)
         cam_chunk_log.delete("1.0", tk.END)
 
     # Interactive Camera Downlink & Command Controls
-    cam_ctrl_frame = ttk.LabelFrame(cam_left, text=" 🎮 Camera Telecommands (437.375 MHz) & SDR Controls ")
+    cam_ctrl_frame = ttk.LabelFrame(cam_left, text=" 🎮 Camera Telecommands (435.313 MHz) & SDR Controls ")
     cam_ctrl_frame.pack(fill=tk.X, padx=8, pady=(0, 6))
 
     c_row1 = tk.Frame(cam_ctrl_frame, bg="#FFFFFF")
@@ -2614,12 +2650,12 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
     aio_main_paned.add(aio_top_paned, weight=6)
 
     # -------------------------------------------------------------------------
-    # COLUMN 1: TELECOMMAND CENTER (UPLINK 437.375 MHz)
+    # COLUMN 1: TELECOMMAND CENTER (UPLINK 435.313 MHz)
     # -------------------------------------------------------------------------
     aio_col_cmd = ttk.Frame(aio_top_paned)
     aio_top_paned.add(aio_col_cmd, weight=3)
 
-    cmd_box_aio = ttk.LabelFrame(aio_col_cmd, text=" 🕹️ Telecommand Center (TX: 437.375 MHz) ")
+    cmd_box_aio = ttk.LabelFrame(aio_col_cmd, text=" 🕹️ Telecommand Center (TX: 435.313 MHz) ")
     cmd_box_aio.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
     q_scroll_cv = tk.Canvas(cmd_box_aio, bg="#FFFFFF", highlightthickness=0)
@@ -2744,7 +2780,7 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
 
     cw_row_a = tk.Frame(cw_box_aio, bg="#0F172A", padx=6, pady=4)
     cw_row_a.pack(fill=tk.X)
-    tk.Label(cw_row_a, text="CW 435.000 MHz", bg="#0F172A", fg="#38BDF8", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT)
+    tk.Label(cw_row_a, text="CW 437.375 MHz", bg="#0F172A", fg="#38BDF8", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT)
     tk.Label(cw_row_a, textvariable=cw_state_var, bg="#334155", fg="#FFFFFF", font=("Segoe UI", 9, "bold"), padx=6, pady=1).pack(side=tk.LEFT, padx=8)
     tk.Label(cw_row_a, textvariable=cw_rssi_var, bg="#0F172A", fg="#FBBF24", font=("Courier", 10, "bold")).pack(side=tk.RIGHT, padx=4)
 
@@ -2776,7 +2812,7 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
 
     aio_cam_canvas = tk.Canvas(cam_box_aio, bg="#0F172A", highlightthickness=0, height=220)
     aio_cam_canvas.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
-    aio_cam_canvas.create_text(160, 110, text="Live Camera Photo Preview\nWaiting for GMSK 435.000 MHz photo packets...",
+    aio_cam_canvas.create_text(160, 110, text="Live Camera Photo Preview\nWaiting for GMSK 437.375 MHz photo packets...",
                               fill="#94A3B8", font=("Segoe UI", 9), justify=tk.CENTER)
 
     cam_btns_f = tk.Frame(cam_box_aio, bg="#FFFFFF")

@@ -56,6 +56,12 @@ namespace OpenBirdsOperation
         private List<string> cwHistoryLines = new List<string>();
         private List<string> hkHistoryLines = new List<string>();
         private List<string> camHistoryLines = new List<string>();
+        private List<string> epdmHistoryLines = new List<string>();
+        private List<string> adcsHistoryLines = new List<string>();
+        private ulong lastFlashAddr = 0;
+        private string dlMissionName = "";
+        private int dlTotalPkts = 0;
+        private readonly HashSet<int> dlReceivedPkts = new HashSet<int>();
         private string cwAccumMain = "";
 
         private SerialPort TncPort = new SerialPort();
@@ -785,11 +791,6 @@ namespace OpenBirdsOperation
                 {
                     uplinkCommand = "DC";
                 }
-                else if (cleanHex == "53 04 CC 5E BD 00 00 00 00 00 00 00 00")
-                {
-                    camHistoryLines.Clear();
-                    uplinkCommand = "CAM";
-                }
                 else if (cleanHex.StartsWith("53 04 CC 5E BC "))
                 {
                     uplinkCommand = "CAMON";
@@ -808,7 +809,9 @@ namespace OpenBirdsOperation
                 }
                 else
                 {
-                    if (cleanHex.StartsWith("53 04 CC 5E BD"))
+                    if (cleanHex.StartsWith("53 04 CC 5E BD") ||
+                        cleanHex.StartsWith("53 01 1D D2 F5") ||
+                        cleanHex.StartsWith("53 01 1D D2 F6"))
                     {
                         camHistoryLines.Clear();
                     }
@@ -2104,6 +2107,10 @@ namespace OpenBirdsOperation
             {
                 inputDialogADCS = new inputDialogADCS();
                 inputDialogADCS.Show();
+                foreach (var l in adcsHistoryLines)
+                {
+                    inputDialogADCS.AppendLiveAdcsLine(l);
+                }
             }
             else
             {
@@ -2117,6 +2124,10 @@ namespace OpenBirdsOperation
             {
                 inputDialogEPDM = new inputDialogEPDM();
                 inputDialogEPDM.Show();
+                foreach (var l in epdmHistoryLines)
+                {
+                    inputDialogEPDM.AppendLiveEpdmLine(l);
+                }
             }
             else
             {
@@ -2240,6 +2251,52 @@ namespace OpenBirdsOperation
             return true;
         }
 
+        private static string GetMissionNameFromAddr(ulong addr)
+        {
+            if (addr < 0x02000000UL) return "HK_1";
+            if (addr < 0x04000000UL) return "HK_2";
+            if (addr < 0x04800000UL) return "ADCS";
+            if (addr < 0x05800000UL) return "CAM_RGB";
+            if (addr < 0x06800000UL) return "CAM_NIR";
+            if (addr < 0x07000000UL) return "EPDM";
+            if (addr < 0x07800000UL) return "DP_M";
+            if (addr < 0x07A00000UL) return "RSV_Table";
+            if (addr < 0x07C00000UL) return "Imp_Flags";
+            if (addr < 0x07E00000UL) return "Part_Size";
+            if (addr < 0x08000000UL) return "Seek_Ptr";
+            return "FLASH";
+        }
+
+        private void TrackMissionDownloadPacket(string mission, int pkt, int total, ulong addr)
+        {
+            if (pkt <= 0) return;
+            if (pkt == 1 || mission != dlMissionName || total != dlTotalPkts)
+            {
+                dlMissionName = mission;
+                dlTotalPkts = total;
+                dlReceivedPkts.Clear();
+            }
+            dlReceivedPkts.Add(pkt);
+
+            var missing = new List<string>();
+            int checkUpTo = (pkt <= total || total == 0) ? pkt : total;
+            for (int i = 1; i <= checkUpTo && missing.Count < 6; i++)
+            {
+                if (!dlReceivedPkts.Contains(i)) missing.Add("#" + i);
+            }
+            string missStr = missing.Count == 0 ? "none" : string.Join(",", missing);
+            string prog = $"[{mission}] Pkt #{pkt}/{total} | Rx: {dlReceivedPkts.Count}/{total} | Missing: {missStr}";
+            bool done = (total > 0 && dlReceivedPkts.Count >= total);
+
+            Console.WriteLine($"[GS DL] {prog} | Addr=0x{addr:X8}");
+            UpdateMainCwBanner(
+                done ? $"DL {mission} OK" : $"DL {mission}",
+                null,
+                prog,
+                $"Last: {mission} Pkt #{pkt}/{total} ({dlReceivedPkts.Count} rx)",
+                done ? Color.FromArgb(21, 128, 61) : Color.FromArgb(37, 99, 235));
+        }
+
         public void ProcessIncomingCwLine(string rawLine)
         {
             if (string.IsNullOrWhiteSpace(rawLine)) return;
@@ -2277,22 +2334,112 @@ namespace OpenBirdsOperation
                 }
             }
 
-            // Capture and forward live HK telemetry packets ({"type":"HK",...} or [FLASH-HEX])
-            bool isHkLine = (line.IndexOf("\"type\":\"HK\"", StringComparison.OrdinalIgnoreCase) >= 0) ||
-                            (line.IndexOf("[FLASH-HEX]", StringComparison.OrdinalIgnoreCase) >= 0);
-            if (isHkLine)
+            // Track active FLASH / CAMERA / HK packet progress (pkt # / total) from GS JSON
+            if (line.IndexOf("\"type\":\"FLASH\"", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                line.IndexOf("\"type\":\"CAMERA\"", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                line.IndexOf("\"type\":\"HK\"", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                if (IsNullOrBlankPayloadHex(line))
+                Match mAddr = Regex.Match(line, "\"addr\"\\s*:\\s*(\\d+)");
+                if (mAddr.Success && ulong.TryParse(mAddr.Groups[1].Value, out ulong parsedAddr))
                 {
-                    Console.WriteLine("[REJECTED] Null/blank HK flash packet ignored.");
+                    lastFlashAddr = parsedAddr;
                 }
-                else
+                Match mPkt = Regex.Match(line, "\"pkt\"\\s*:\\s*(\\d+)");
+                Match mTot = Regex.Match(line, "\"total\"\\s*:\\s*(\\d+)");
+                if (mPkt.Success && mTot.Success &&
+                    int.TryParse(mPkt.Groups[1].Value, out int pktNum) &&
+                    int.TryParse(mTot.Groups[1].Value, out int totNum))
                 {
-                    hkHistoryLines.Add(line);
-                    if (hkHistoryLines.Count > 500) hkHistoryLines.RemoveAt(0);
-                    if (inputDialogHK != null && !inputDialogHK.IsDisposed)
+                    string mName = line.IndexOf("\"type\":\"CAMERA\"", StringComparison.OrdinalIgnoreCase) >= 0
+                        ? "CAMERA"
+                        : (line.IndexOf("\"type\":\"HK\"", StringComparison.OrdinalIgnoreCase) >= 0
+                            ? "HK"
+                            : GetMissionNameFromAddr(lastFlashAddr));
+                    TrackMissionDownloadPacket(mName, pktNum, totNum, lastFlashAddr);
+
+                    if (lastFlashAddr >= 0x06800000UL && lastFlashAddr < 0x07000000UL)
                     {
-                        inputDialogHK.AppendLiveHkLine(line);
+                        epdmHistoryLines.Add(line);
+                        if (epdmHistoryLines.Count > 1000) epdmHistoryLines.RemoveAt(0);
+                        if (inputDialogEPDM != null && !inputDialogEPDM.IsDisposed)
+                        {
+                            inputDialogEPDM.AppendLiveEpdmLine(line);
+                        }
+                    }
+                    else if (lastFlashAddr >= 0x04000000UL && lastFlashAddr < 0x04800000UL)
+                    {
+                        adcsHistoryLines.Add(line);
+                        if (adcsHistoryLines.Count > 1000) adcsHistoryLines.RemoveAt(0);
+                        if (inputDialogADCS != null && !inputDialogADCS.IsDisposed)
+                        {
+                            inputDialogADCS.AppendLiveAdcsLine(line);
+                        }
+                    }
+                }
+            }
+            else if (line.IndexOf("off=0x", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                Match mOff = Regex.Match(line, "off=0x([0-9a-fA-F]+)", RegexOptions.IgnoreCase);
+                if (mOff.Success)
+                {
+                    try { lastFlashAddr = Convert.ToUInt64(mOff.Groups[1].Value, 16); } catch { }
+                }
+            }
+
+            // Detect EPDM / ADCS flash chunks
+            bool isFlashHexLine = line.IndexOf("[FLASH-HEX]", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool isEpdmAddr = (lastFlashAddr >= 0x06800000UL && lastFlashAddr < 0x07000000UL);
+            bool hasEpdmMagic = isFlashHexLine &&
+                                (line.IndexOf("45 50 44 4D", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                 line.IndexOf("4550444D", StringComparison.OrdinalIgnoreCase) >= 0);
+            bool isAdcsAddr = (lastFlashAddr >= 0x04000000UL && lastFlashAddr < 0x04800000UL);
+            bool hasAdcsMagic = isFlashHexLine &&
+                                (line.IndexOf("41 44 43 53", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                 line.IndexOf("41444353", StringComparison.OrdinalIgnoreCase) >= 0);
+
+            if (isFlashHexLine && (isEpdmAddr || hasEpdmMagic))
+            {
+                if (!IsNullOrBlankPayloadHex(line))
+                {
+                    epdmHistoryLines.Add(line);
+                    if (epdmHistoryLines.Count > 1000) epdmHistoryLines.RemoveAt(0);
+                    if (inputDialogEPDM != null && !inputDialogEPDM.IsDisposed)
+                    {
+                        inputDialogEPDM.AppendLiveEpdmLine(line);
+                    }
+                }
+            }
+            else if (isFlashHexLine && (isAdcsAddr || hasAdcsMagic))
+            {
+                if (!IsNullOrBlankPayloadHex(line))
+                {
+                    adcsHistoryLines.Add(line);
+                    if (adcsHistoryLines.Count > 1000) adcsHistoryLines.RemoveAt(0);
+                    if (inputDialogADCS != null && !inputDialogADCS.IsDisposed)
+                    {
+                        inputDialogADCS.AppendLiveAdcsLine(line);
+                    }
+                }
+            }
+            else
+            {
+                // Capture and forward live HK telemetry packets ({"type":"HK",...} or [FLASH-HEX])
+                bool isHkLine = (line.IndexOf("\"type\":\"HK\"", StringComparison.OrdinalIgnoreCase) >= 0) ||
+                                isFlashHexLine;
+                if (isHkLine)
+                {
+                    if (IsNullOrBlankPayloadHex(line))
+                    {
+                        Console.WriteLine("[REJECTED] Null/blank HK flash packet ignored.");
+                    }
+                    else
+                    {
+                        hkHistoryLines.Add(line);
+                        if (hkHistoryLines.Count > 500) hkHistoryLines.RemoveAt(0);
+                        if (inputDialogHK != null && !inputDialogHK.IsDisposed)
+                        {
+                            inputDialogHK.AppendLiveHkLine(line);
+                        }
                     }
                 }
             }

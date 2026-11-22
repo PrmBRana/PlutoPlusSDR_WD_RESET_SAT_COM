@@ -857,7 +857,7 @@ namespace OpenBirdsOperation
             this.lblCwMainTitle.Name = "lblCwMainTitle";
             this.lblCwMainTitle.Size = new System.Drawing.Size(176, 13);
             this.lblCwMainTitle.TabIndex = 0;
-            this.lblCwMainTitle.Text = "CW DECODE  435.000 MHz";
+            this.lblCwMainTitle.Text = "CW DECODE  437.375 MHz";
             this.lblCwMainTitle.Click += new System.EventHandler(this.button_cw_decoder_Click);
             // 
             // lblCwMainState

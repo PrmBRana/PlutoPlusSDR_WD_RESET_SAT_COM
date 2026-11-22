@@ -17,9 +17,183 @@ namespace OpenBirdsOperation
 
         public DateTime dtAppStart = DateTime.UtcNow;
 
+        private readonly System.Text.StringBuilder _liveHexStream = new System.Text.StringBuilder();
+        private bool _liveHeaderFound = false;
+        private bool _liveFooterFound = false;
+        private int _liveSampleCount = 0;
+        private int _lastPkt = 0;
+        private int _totalPkts = 0;
+        private readonly System.Collections.Generic.HashSet<int> _rxPkts = new System.Collections.Generic.HashSet<int>();
+        private RichTextBox rTBox_adcs_live_decoded;
+        private Label lbl_adcs_live_status;
+
         public inputDialogADCS()
         {
             InitializeComponent();
+            InitLiveDecodeUi();
+        }
+
+        private void InitLiveDecodeUi()
+        {
+            this.ClientSize = new System.Drawing.Size(Math.Max(this.ClientSize.Width, 680), 460);
+            rTBox_adsc_raw_data.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            rTBox_adsc_raw_data.Width = this.ClientSize.Width - 18;
+            rTBox_adsc_raw_data.Height = 110;
+
+            lbl_adcs_live_status = new Label
+            {
+                Text = "Live Decoded ADCS Gyro (SPI4 PE4) & Mag (SPI1 PA4) — waiting for 'ADCS' (41 44 43 53)...",
+                Location = new System.Drawing.Point(9, rTBox_adsc_raw_data.Bottom + 8),
+                Size = new System.Drawing.Size(this.ClientSize.Width - 18, 20),
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+                Font = new System.Drawing.Font("Segoe UI", 9F, System.Drawing.FontStyle.Bold)
+            };
+
+            rTBox_adcs_live_decoded = new RichTextBox
+            {
+                Location = new System.Drawing.Point(9, lbl_adcs_live_status.Bottom + 4),
+                Size = new System.Drawing.Size(this.ClientSize.Width - 18, this.ClientSize.Height - (lbl_adcs_live_status.Bottom + 56)),
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+                ReadOnly = true,
+                Font = new System.Drawing.Font("Consolas", 9.5F, System.Drawing.FontStyle.Regular),
+                BackColor = System.Drawing.Color.FromArgb(18, 24, 34),
+                ForeColor = System.Drawing.Color.FromArgb(147, 197, 253)
+            };
+
+            btn_verify_adcs.Location = new System.Drawing.Point(this.ClientSize.Width - 210, this.ClientSize.Height - 40);
+            btn_verify_adcs.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+            button_cancel_adcs.Location = new System.Drawing.Point(this.ClientSize.Width - 105, this.ClientSize.Height - 40);
+            button_cancel_adcs.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+
+            this.Controls.Add(lbl_adcs_live_status);
+            this.Controls.Add(rTBox_adcs_live_decoded);
+        }
+
+        private static short ReadInt16BE(string hex, int charOffset)
+        {
+            ushort val = Convert.ToUInt16(hex.Substring(charOffset, 4), 16);
+            return unchecked((short)val);
+        }
+
+        private static string ExtractCleanHex(string line)
+        {
+            if (string.IsNullOrWhiteSpace(line)) return string.Empty;
+            string s = line;
+            int idx = s.IndexOf("[FLASH-HEX]", StringComparison.OrdinalIgnoreCase);
+            if (idx >= 0) s = s.Substring(idx + "[FLASH-HEX]".Length);
+            return Regex.Replace(s, @"[^0-9a-fA-F]", "").ToUpperInvariant();
+        }
+
+        private void UpdateLiveStatusLabel()
+        {
+            string pktInfo = (_totalPkts > 0)
+                ? $"Pkt #{_lastPkt}/{_totalPkts} (Rx: {_rxPkts.Count}/{_totalPkts}) | "
+                : "";
+            if (_liveFooterFound)
+                lbl_adcs_live_status.Text = $"{pktInfo}ADCS Complete ({_liveSampleCount} samples, Footer FF D9)";
+            else if (_liveHeaderFound)
+                lbl_adcs_live_status.Text = $"{pktInfo}Live Decoded ADCS Samples: {_liveSampleCount} (waiting for FF D9...)";
+            else
+                lbl_adcs_live_status.Text = $"{pktInfo}Waiting for ADCS header (41 44 43 53)...";
+        }
+
+        public void AppendLiveAdcsLine(string line)
+        {
+            if (this.IsDisposed) return;
+            if (this.InvokeRequired)
+            {
+                try { this.BeginInvoke(new Action<string>(AppendLiveAdcsLine), line); } catch { }
+                return;
+            }
+
+            if (line.IndexOf("\"type\":\"FLASH\"", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                Match mp = Regex.Match(line, "\"pkt\"\\s*:\\s*(\\d+)");
+                Match mt = Regex.Match(line, "\"total\"\\s*:\\s*(\\d+)");
+                if (mp.Success && mt.Success &&
+                    int.TryParse(mp.Groups[1].Value, out int pn) &&
+                    int.TryParse(mt.Groups[1].Value, out int tn))
+                {
+                    if (pn == 1 || tn != _totalPkts) _rxPkts.Clear();
+                    _lastPkt = pn;
+                    _totalPkts = tn;
+                    _rxPkts.Add(pn);
+                    UpdateLiveStatusLabel();
+                }
+                return;
+            }
+
+            string hex = ExtractCleanHex(line);
+            if (string.IsNullOrEmpty(hex)) return;
+
+            if (rTBox_adsc_raw_data.TextLength > 0) rTBox_adsc_raw_data.AppendText(Environment.NewLine);
+            rTBox_adsc_raw_data.AppendText(InsertSpacesAfterEveryTwoBytes(hex));
+            rTBox_adsc_raw_data.SelectionStart = rTBox_adsc_raw_data.TextLength;
+            rTBox_adsc_raw_data.ScrollToCaret();
+
+            _liveHexStream.Append(hex);
+            DecodeBufferedAdcsSamples();
+        }
+
+        private void DecodeBufferedAdcsSamples()
+        {
+            // Stream: "ADCS" (41444353) + N x 16-byte samples (32 hex chars each) + "FFD9"
+            while (!_liveFooterFound)
+            {
+                string buf = _liveHexStream.ToString();
+                if (!_liveHeaderFound)
+                {
+                    int hdrIdx = buf.IndexOf("41444353", StringComparison.Ordinal);
+                    if (hdrIdx < 0)
+                    {
+                        if (_liveHexStream.Length > 6) _liveHexStream.Remove(0, _liveHexStream.Length - 6);
+                        break;
+                    }
+                    _liveHexStream.Remove(0, hdrIdx + 8);
+                    _liveHeaderFound = true;
+                    string hdrMsg = "=== ADCS HEADER RECEIVED: 41 44 43 53 ('ADCS') — Live Decoding 1 Hz Samples ===\r\n";
+                    rTBox_adcs_live_decoded.AppendText(hdrMsg);
+                    UpdateLiveStatusLabel();
+                    Console.Write(hdrMsg);
+                    continue;
+                }
+
+                if (buf.Length >= 4 && buf.StartsWith("FFD9", StringComparison.Ordinal))
+                {
+                    _liveHexStream.Remove(0, 4);
+                    _liveFooterFound = true;
+                    string ftrMsg = $"=== ADCS FOOTER RECEIVED: FF D9 | Complete! Total: {_liveSampleCount} sample(s) ===\r\n";
+                    rTBox_adcs_live_decoded.AppendText(ftrMsg);
+                    rTBox_adcs_live_decoded.SelectionStart = rTBox_adcs_live_decoded.TextLength;
+                    rTBox_adcs_live_decoded.ScrollToCaret();
+                    UpdateLiveStatusLabel();
+                    Console.Write(ftrMsg);
+                    break;
+                }
+
+                if (buf.Length < 32) break;
+
+                string sHex = buf.Substring(0, 32);
+                _liveHexStream.Remove(0, 32);
+                _liveSampleCount++;
+
+                ushort seq = Convert.ToUInt16(sHex.Substring(0, 4), 16);
+                double gx = ReadInt16BE(sHex, 4) / 100.0;
+                double gy = ReadInt16BE(sHex, 8) / 100.0;
+                double gz = ReadInt16BE(sHex, 12) / 100.0;
+                double gt = ReadInt16BE(sHex, 16) / 100.0;
+                double mx = ReadInt16BE(sHex, 20) / 100.0;
+                double my = ReadInt16BE(sHex, 24) / 100.0;
+                double mz = ReadInt16BE(sHex, 28) / 100.0;
+                double mb = Math.Sqrt(mx * mx + my * my + mz * mz);
+
+                string lineOut = $"#{seq,2} | Gyro: X={gx,7:F2} Y={gy,7:F2} Z={gz,7:F2} dps (T={gt,5:F2} C) | Mag: X={mx,7:F2} Y={my,7:F2} Z={mz,7:F2} uT (|B|={mb,6:F2})\r\n";
+                rTBox_adcs_live_decoded.AppendText(lineOut);
+                rTBox_adcs_live_decoded.SelectionStart = rTBox_adcs_live_decoded.TextLength;
+                rTBox_adcs_live_decoded.ScrollToCaret();
+                UpdateLiveStatusLabel();
+                Console.Write("[ADCS LIVE] " + lineOut);
+            }
         }
 
         private void button_cancel_adcs_Click(object sender, EventArgs e)
@@ -59,10 +233,64 @@ namespace OpenBirdsOperation
         {
             try
             {
-                string rawADCSRx = rTBox_adsc_raw_data.Text;
-                rawADCSRx = rawADCSRx.Replace(" ", "").Replace("\r", "").Replace("\t", "").Replace("\n", "");
+                string rawADCSRx = string.Join("", rTBox_adsc_raw_data.Lines.Select(l => ExtractCleanHex(l)));
 
-                rawADCSRx = rawADCSRx.ToUpper();
+                // Check for binary ADCS stream: 41444353 + N*32 hex chars + FFD9
+                int adcsStart = rawADCSRx.IndexOf("41444353", StringComparison.Ordinal);
+                if (adcsStart >= 0)
+                {
+                    int pos = adcsStart + 8;
+                    int adcsEnd = rawADCSRx.LastIndexOf("FFD9", StringComparison.Ordinal);
+                    if (adcsEnd < pos) adcsEnd = rawADCSRx.Length;
+                    var samples = new System.Collections.Generic.List<string>();
+                    while (pos + 32 <= adcsEnd)
+                    {
+                        samples.Add(rawADCSRx.Substring(pos, 32));
+                        pos += 32;
+                    }
+                    if (samples.Count > 0)
+                    {
+                        savingADCSRootPath = "../Storage/ADCS_DETAILS";
+                        if (!Directory.Exists(savingADCSRootPath)) Directory.CreateDirectory(savingADCSRootPath);
+                        string pathXlsx = Path.Combine(savingADCSRootPath, DateTime.UtcNow.ToString("yyyyMMdd_HHmmss") + "_ADCS_Data_Verification.xlsx");
+                        ExcelPackage.LicenseContext = OfficeOpenXml.LicenseContext.NonCommercial;
+                        using (var pkg = new ExcelPackage(new FileInfo(pathXlsx)))
+                        {
+                            var ws = pkg.Workbook.Worksheets.Add("ADCS_Gyro_Mag");
+                            string[] hdrs = { "Seq", "Gyro_X (dps)", "Gyro_Y (dps)", "Gyro_Z (dps)", "Gyro_Temp (C)", "Mag_X (uT)", "Mag_Y (uT)", "Mag_Z (uT)", "Mag_|B| (uT)", "Raw Hex" };
+                            for (int c = 0; c < hdrs.Length; c++) ws.Cells[1, c + 1].Value = hdrs[c];
+                            ws.Row(1).Style.Font.Bold = true;
+                            int row = 2;
+                            foreach (var sh in samples)
+                            {
+                                ushort sq = Convert.ToUInt16(sh.Substring(0, 4), 16);
+                                double gx = ReadInt16BE(sh, 4) / 100.0;
+                                double gy = ReadInt16BE(sh, 8) / 100.0;
+                                double gz = ReadInt16BE(sh, 12) / 100.0;
+                                double gt = ReadInt16BE(sh, 16) / 100.0;
+                                double mx = ReadInt16BE(sh, 20) / 100.0;
+                                double my = ReadInt16BE(sh, 24) / 100.0;
+                                double mz = ReadInt16BE(sh, 28) / 100.0;
+                                ws.Cells[row, 1].Value = sq;
+                                ws.Cells[row, 2].Value = gx;
+                                ws.Cells[row, 3].Value = gy;
+                                ws.Cells[row, 4].Value = gz;
+                                ws.Cells[row, 5].Value = gt;
+                                ws.Cells[row, 6].Value = mx;
+                                ws.Cells[row, 7].Value = my;
+                                ws.Cells[row, 8].Value = mz;
+                                ws.Cells[row, 9].Value = Math.Sqrt(mx * mx + my * my + mz * mz);
+                                ws.Cells[row, 10].Value = InsertSpacesAfterEveryTwoBytes(sh);
+                                row++;
+                            }
+                            ws.Cells[1, 1, row - 1, hdrs.Length].AutoFitColumns();
+                            pkg.Save();
+                        }
+                        MessageBox.Show($"Decoded {samples.Count} ADCS sample(s).\nSaved to: {pathXlsx}", "ADCS Decoded Data", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        this.Close();
+                        return;
+                    }
+                }
 
                 string sequenceToExclude = "404040404040E0729C64A692406103F0";
 

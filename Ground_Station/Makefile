@@ -243,7 +243,7 @@ STM32_PROG ?= $(shell which STM32_Programmer_CLI 2>/dev/null || \
 # FLASH CPU2 (0x08032000 - 0x0803FFFF)
 # ==========================================================================
 
-flash flash_gs flash_GS: $(TARGET).bin
+flash_GS: $(TARGET).bin
 	@if [ -x "$$(which $(STM32_PROG) 2>/dev/null)" ] || [ -x "$(STM32_PROG)" ]; then \
 	  echo "Flashing Ground Station $(TARGET).bin to 0x08032000 using STM32_Programmer_CLI (CPU1 preserved)..."; \
 	  $(STM32_PROG) -c port=SWD mode=UR -w $(TARGET).bin 0x08032000 -v -hardRst 2>/dev/null || \
@@ -261,9 +261,6 @@ flash flash_gs flash_GS: $(TARGET).bin
 	fi
 
 gs GS: $(TARGET).bin
-
-flash_sat flashsatM0 flash_SAT:
-	$(MAKE) -C ../Satellite_M0+/Com_sat flash_sat
 
 # ==========================================================================
 # SIZE
@@ -303,4 +300,4 @@ gs_gui desktop_gs run_gs_gui:
 build_gs_gui:
 	$(MAKE) -C Desktop_GS_SOFTWARE-20261101T100316Z-1-001/Desktop_GS_SOFTWARE/NAST_GS_CODE build
 
-.PHONY: all flash flash_gs flash_GS gs GS size clean gs_gui desktop_gs run_gs_gui build_gs_gui
+.PHONY: all flash_GS gs GS size clean gs_gui desktop_gs run_gs_gui build_gs_gui

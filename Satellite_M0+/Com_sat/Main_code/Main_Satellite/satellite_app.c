@@ -1559,7 +1559,7 @@ void Satellite_Send_Camera_Image(uint16_t expected_chunks, bool local_dummy)
     uart1_printf("\r\n============================================================\r\n");
     uart1_printf(">>> [M0+ CAMERA] DOWNLINKING CUBESAT PHOTO IMAGE (%u PACKETS%s) <<<\r\n",
                  (unsigned int)total_chunks, local_dummy ? ", dummy/local" : "");
-    uart1_puts(" Frequency : 435.000 MHz (GMSK Downlink)\r\n");
+    uart1_puts(" Frequency : 437.375 MHz (GMSK Downlink)\r\n");
     const char *cam_pa_str = (s_config.rfSwitchConfig5V == RBI_SWITCH_RFO_LP5V) ?
         "5V External Power Amplifier Active (PC3=1, PA0=1 5V Boost)" :
         "3.3V External Power Amplifier Active (PC2=1, Safe Mode)";
@@ -1692,7 +1692,7 @@ void Satellite_Send_Ping_Response(void)
  *     NACK Error:    [0]=0xFF, [1]=err_code, [2]=count
  * - CRC-16 CCITT (2 Bytes)
  * - 5 Trailing Flags (0x7E)
- * Transmitted via GMSK 4800 bps AX.25 G3RUH scrambled on 435.000 MHz (5V PA).
+ * Transmitted via GMSK 4800 bps AX.25 G3RUH scrambled on 437.375 MHz (5V PA).
  * ============================================================================
  */
 

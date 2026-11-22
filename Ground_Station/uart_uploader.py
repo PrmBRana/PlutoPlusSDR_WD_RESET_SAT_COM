@@ -9,8 +9,8 @@ Location: Ground_Station/uart_uploader.py (portable — run from any clone of th
 Direct serial interface to STM32WL55 Ground Station firmware (gs_main.c)
 via ST-LINK Virtual COM Port (PA2/PA3 LPUART1 @ 115200 8N1).
 
-Transmits commands over RF to Satellite M0+ (437.375 MHz Uplink) in AX.25
-G3RUH scrambled packets, and receives Satellite Downlink (435.000 MHz).
+Transmits commands over RF to Satellite M0+ (435.313 MHz Uplink) in AX.25
+G3RUH scrambled packets, and receives Satellite Downlink (437.375 MHz).
 ==============================================================================
 """
 
@@ -32,8 +32,8 @@ except ImportError:
 # Protocol Constants
 SAT_CALLSIGN = "9NS2S2"
 GS_CALLSIGN  = "GROUND"
-TX_FREQ_STR  = "437.375 MHz (Uplink to Satellite)"
-RX_FREQ_STR  = "435.000 MHz (Downlink from Satellite)"
+TX_FREQ_STR  = "435.313 MHz (Uplink to Satellite)"
+RX_FREQ_STR  = "437.375 MHz (Downlink from Satellite)"
 
 PRESET_COMMANDS = {
     "ping": {
@@ -254,7 +254,7 @@ def main():
     parser.add_argument("--hk", action="store_true", help="Request Combined Live HK Telemetry (80 Bytes)")
     parser.add_argument("--cam", action="store_true", help="Trigger Camera Snapshot")
     parser.add_argument("--status", action="store_true", help="Query Ground Station link status")
-    parser.add_argument("--carrier", type=int, nargs="?", const=5, default=None, help="Transmit continuous test carrier @ 437.375 MHz for N seconds (default: 5)")
+    parser.add_argument("--carrier", type=int, nargs="?", const=5, default=None, help="Transmit continuous test carrier @ 435.313 MHz for N seconds (default: 5)")
     parser.add_argument("--hex", type=str, default=None, help="Send arbitrary 13-Byte or raw HEX command")
     parser.add_argument("--listen", type=int, default=0, help="Listen for N seconds after sending (default: 10)")
     parser.add_argument("--interactive", "-i", action="store_true", help="Launch interactive command prompt")
@@ -274,7 +274,7 @@ def main():
     has_specific_cmd = (args.ping or args.hk or args.cam or args.status or args.hex or (args.carrier is not None))
 
     if args.carrier is not None:
-        print(f"[TEST] Transmitting Continuous Carrier on 437.375 MHz for {args.carrier} seconds...")
+        print(f"[TEST] Transmitting Continuous Carrier on 435.313 MHz for {args.carrier} seconds...")
         uploader.send_line(f"CARRIER {args.carrier}")
         time.sleep(args.carrier + 1)
     elif args.ping:

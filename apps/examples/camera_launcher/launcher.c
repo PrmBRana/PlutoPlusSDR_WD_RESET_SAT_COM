@@ -121,9 +121,9 @@ int launcher_main(int argc, char *argv[])
       printf("[LAUNCHER] [IPC] WARNING: Cortex-M0+ handshake timeout (proceeding with OBC bring-up).\n");
     }
 
-  /* 3. Launch LittleFS Telemetry Storage Task (Stack: 4096 Bytes for format/mount headroom) */
+  /* 3. Launch LittleFS Storage Consumer Task (Stack: 2560 B) */
   printf("[LAUNCHER] Spawning LittleFS storage daemon...\n");
-  littlefs_pid = task_create("littlefs", 100, 4096, littlefs_main, NULL);
+  littlefs_pid = task_create("littlefs", 100, 2560, littlefs_main, NULL);
   if (littlefs_pid < 0)
     {
       printf("[LAUNCHER] ERROR: Failed to start LittleFS daemon (ret: %d, errno: %d)\n", littlefs_pid, errno);

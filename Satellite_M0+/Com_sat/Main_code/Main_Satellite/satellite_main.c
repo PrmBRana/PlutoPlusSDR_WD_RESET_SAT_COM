@@ -141,7 +141,7 @@ static inline __attribute__((unused)) bool Sat_Callsign_Char_OK(uint8_t shifted)
  * is first validated and in STATE_DOWNLINK.
  */
 typedef struct {
-    bool flash, dummy_cam, real_cam, cam_on, cam_download, ping, adcs, epdm, hk;
+    bool flash, erase, dummy_cam, real_cam, cam_on, cam_download, ping, adcs, epdm, hk;
 } SatTcClass_t;
 
 static void Sat_Classify_Telecommand(const uint8_t *p, uint16_t plen, SatTcClass_t *c)
@@ -159,15 +159,18 @@ static void Sat_Classify_Telecommand(const uint8_t *p, uint16_t plen, SatTcClass
     c->dummy_cam    = (mcu_id == CMD_TYPE_CAMERA && (op2 == 0xBE || data_id == 0x00D0)) ||
                       (op0 == 0xC5 && op1 == 0xE0) ||
                       (op0 == 0xCC && (op1 == 0x5E || op1 == 0x58) && op2 == 0xBE);
-    c->real_cam     = (mcu_id == CMD_TYPE_CAMERA && op0 == 0xCC && (op1 == 0x5E || op1 == 0x58) && (op2 == 0xBC || op2 == 0xCA)) ||
+    c->real_cam     = (mcu_id == CMD_TYPE_CAMERA && op0 == 0xCC && (op1 == 0x5E || op1 == 0x58) &&
+                       (op2 == 0xBD || op2 == 0xBC || op2 == 0xCA)) ||
                       (mcu_id == CMD_TYPE_CAMERA && op0 == 0xCA);
-    c->cam_download = (op0 == 0xCC && (op1 == 0x5E || op1 == 0x58) && op2 == 0xBD) ||
-                      (op0 == 0x1D && op1 == 0xD2 && op2 == 0xF5) ||
+    c->cam_download = (op0 == 0x1D && op1 == 0xD2 && (op2 == 0xF5 || op2 == 0xF6)) ||
                       (mcu_id == CMD_TYPE_CAMERA && op0 == 0x1D && op1 == 0xD2) ||
                       (op0 == 0xC5 && op1 == 0xE0);
     c->cam_on       = c->real_cam;
     c->ping         = (op0 == 0x1D && op1 == 0xD1 && op2 == 0xF5);
-    c->flash        = (op0 == 0x1D && op1 == 0xD1 && op2 == 0xF8) || (op2 == 0xF8) || (data_id == 0x00F8);
+    c->erase        = (op0 == 0xFF && op1 == 0xBE && (op2 == 0xCC || op2 == 0xDD || op2 == 0xAA));
+    c->flash        = (op0 == 0x1D && op1 == 0xD1 && (op2 == 0xF4 || op2 == 0xF8)) ||
+                      (op0 == 0x1D && op1 == 0xD2 && (op2 == 0xF7 || op2 == 0xF8)) ||
+                      (op2 == 0xF8) || (data_id == 0x00F8);
     c->hk           = (op0 == 0x1D && (op1 == 0xD1 || op1 == 0xD2) && (op2 == 0xF2 || op2 == 0xF3)) ||
                       (data_id == 0x0001 || data_id == 0x0002 || data_id == 0x00F2 || data_id == 0x00F3) ||
                       (mcu_id == CMD_TYPE_HK && op0 == 0x1D && (op2 == 0xF2 || op2 == 0xF3 || op1 == 0xD1));
@@ -177,7 +180,7 @@ static void Sat_Classify_Telecommand(const uint8_t *p, uint16_t plen, SatTcClass
 
 static bool Sat_Tc_Is_Known(const SatTcClass_t *c)
 {
-    return c->flash || c->dummy_cam || c->real_cam || c->cam_on || c->cam_download || c->ping || c->hk || c->adcs || c->epdm;
+    return c->flash || c->erase || c->dummy_cam || c->real_cam || c->cam_on || c->cam_download || c->ping || c->hk || c->adcs || c->epdm;
 }
 
 static bool Sat_Tc_Is_Valid(const SatTcClass_t *c, const uint8_t *p, uint16_t plen)
@@ -470,7 +473,7 @@ static void M0_Display_CW_Signal(const char *beacon_name, const char *callsign, 
     uart1_puts("\r\n========================================================================\r\n");
     uart1_printf(">>> [STATE_CW | CYCLE #%lu] TRANSMITTING MORSE CW SIGNAL: %s <<<\r\n", (unsigned long)cycle, beacon_name);
     uart1_puts("========================================================================\r\n");
-    uart1_puts("  Downlink RF Carrier : 435.000 MHz (CW OOK Morse Keying)\r\n");
+    uart1_puts("  Downlink RF Carrier : 437.375 MHz (CW OOK Morse Keying)\r\n");
     uart1_puts("  Morse Speed         : 15 WPM (Dit = 80ms, Dah = 240ms)\r\n");
     uart1_puts("  RF Front-End State  : 3.3V External Power Amplifier Active (PC2=1)\r\n");
     uart1_printf("  Transmitted Callsign: \"%s\"\r\n", callsign);
@@ -577,7 +580,7 @@ static void Transmit_Burst_50(void) {
  * PERIODIC BEACON POLICY:
  * - NO AUTOMATIC GMSK BEACONS ARE TRANSMITTED.
  * - Periodic beacons are STRICTLY Morse CW1 and CW2 (OOK @ 15 WPM, 3.3V PA).
- * - GMSK (4800 bps, 5V PA, 435.000 MHz) is reserved SOLELY for:
+ * - GMSK (4800 bps, 5V PA, 437.375 MHz) is reserved SOLELY for:
  *     1. Command Acknowledgment (ACK Accepted [0xAC, 0x00, mission_id])
  *     2. Command Completion (ACK Completed [0xEE, 0x01, mission_id])
  *     3. Error Notification (NACK [0xEE, err_code, mission_id])
@@ -596,7 +599,7 @@ int main(void) {
     uart1_puts("\r\n======================================================================\r\n");
     uart1_puts("     STM32WL55 AX.25 + G3RUH 3-STATE MISSION EXECUTIVE READY          \r\n");
     uart1_puts("     FW-ID: SAT-G3RUH-UPLINK8                                         \r\n");
-    uart1_puts("     RX: 437.375 MHz | preamble+sync 93 0B 51 DE | 13B 0x53 trim     \r\n");
+    uart1_puts("     RX: 435.313 MHz | preamble+sync 93 0B 51 DE | 13B 0x53 trim     \r\n");
     uart1_puts("     CYCLE: CW1 -> LISTEN -> CW2 -> LISTEN                            \r\n");
     uart1_puts("======================================================================\r\n");
 
@@ -655,7 +658,7 @@ int main(void) {
                 if (s_cmd_service_active || (s_last_cmd_time_ms != 0 && (now - s_last_cmd_time_ms < SAT_CMD_HOLD_TIME_MS))) {
                     uint32_t rem_hold = (SAT_CMD_HOLD_TIME_MS > (now - s_last_cmd_time_ms))
                                         ? (SAT_CMD_HOLD_TIME_MS - (now - s_last_cmd_time_ms)) : 0;
-                    uart1_printf(">>> [M0+] CW PAUSED (Command Session Active | %lu s remaining in hold). Listening on 437.375 MHz... <<<\r\n",
+                    uart1_printf(">>> [M0+] CW PAUSED (Command Session Active | %lu s remaining in hold). Listening on 435.313 MHz... <<<\r\n",
                                  (unsigned long)(rem_hold / 1000UL));
                     listen_start_tick = HAL_GetTick();
                     RadioApp_StartRx();
@@ -721,7 +724,7 @@ int main(void) {
                 /* After CW, arm RX and enter 30s command listen window */
                 listen_start_tick = HAL_GetTick();
                 RadioApp_StartRx();
-                uart1_printf(">>> [M0+] RX Listening armed on 437.375 MHz (%lu s window) <<<\r\n\r\n",
+                uart1_printf(">>> [M0+] RX Listening armed on 435.313 MHz (%lu s window) <<<\r\n\r\n",
                              (unsigned long)(SAT_LISTEN_DURATION_MS / 1000UL));
                 app_state = STATE_COMMAND_LISTEN;
                 break;
@@ -754,7 +757,7 @@ int main(void) {
                     if (s_cmd_service_active || (s_last_cmd_time_ms != 0 && (now - s_last_cmd_time_ms < SAT_CMD_HOLD_TIME_MS))) {
                         uint32_t rem_hold = (SAT_CMD_HOLD_TIME_MS > (now - s_last_cmd_time_ms))
                                             ? (SAT_CMD_HOLD_TIME_MS - (now - s_last_cmd_time_ms)) : 0;
-                        uart1_printf(">>> [M0+ RX LISTEN] Active on 437.375 MHz (CW PAUSED | %lu s remaining in hold) <<<\r\n",
+                        uart1_printf(">>> [M0+ RX LISTEN] Active on 435.313 MHz (CW PAUSED | %lu s remaining in hold) <<<\r\n",
                                      (unsigned long)(rem_hold / 1000UL));
                     } else if (elapsed < SAT_LISTEN_DURATION_MS) {
                         uint32_t rem = SAT_LISTEN_DURATION_MS - elapsed;
@@ -1096,6 +1099,7 @@ int main(void) {
                     SatTcClass_t tcc;
                     Sat_Classify_Telecommand(payload_ptr, payload_len, &tcc);
                     bool is_flash_cmd        = tcc.flash;
+                    bool is_erase_cmd        = tcc.erase;
                     bool is_dummy_cam_cmd    = tcc.dummy_cam;
                     bool is_cam_on_cmd       = tcc.cam_on;
                     bool is_cam_download_cmd = tcc.cam_download;
@@ -1104,13 +1108,15 @@ int main(void) {
                     bool is_epdm_cmd         = tcc.epdm;
                     bool is_hk_cmd           = tcc.hk;
 
-                    if (!is_flash_cmd && !is_dummy_cam_cmd && !is_cam_on_cmd && !is_cam_download_cmd && !is_ping_cmd && !is_hk_cmd && !is_adcs_cmd && !is_epdm_cmd) {
+                    if (!is_flash_cmd && !is_erase_cmd && !is_dummy_cam_cmd && !is_cam_on_cmd && !is_cam_download_cmd && !is_ping_cmd && !is_hk_cmd && !is_adcs_cmd && !is_epdm_cmd) {
                         uart1_printf("[M0+] COMMAND CHECK: UNRECOGNIZED / INVALID OPCODE (0x%02X 0x%02X 0x%02X) -> SENDING NACK\r\n",
                                      op0, op1, op2);
                         /* CW stays paused during NACK transmission */
                         Satellite_Send_Nack(SAT_ERR_INVALID_CMD, SAT_MISSION_UNKNOWN);
                     } else {
                         uart1_puts("[M0+] TC PASSED\r\n");
+
+                        bool m4_ack_already_handled = false;
 
                         /* ---- ACK Accepted sent FIRST before any data downlink ---- */
                         /* CW beacon remains OFF during entire downlink via s_cmd_service_active=true */
@@ -1203,14 +1209,59 @@ int main(void) {
                                     uart1_puts("[M0+] Camera data NOT arrived in 30s -> NACK (0xEE 0x05)\r\n");
                                     Satellite_Send_Nack(SAT_ERR_DATA_MISSING, SAT_MISSION_CAM_RGB);
                                 }
+                                m4_ack_already_handled = true;
+                            }
+                        } else if (is_erase_cmd) {
+                            uart1_puts("\r\n>>> [M0+] ERASE FLASH COMMAND -> FORWARDING TO M4 <<<\r\n");
+                            Satellite_Send_Ack_Accepted(SAT_MISSION_HK);
+                            Satellite_GMSK_Release();
+                            SHARED_FLASH_REQ->seq = 0;
+                            Sat_Forward_Command_To_M4(payload_ptr, payload_len);
+                            {
+                                uint32_t wait_start = HAL_GetTick();
+                                bool m4_done = false;
+                                while ((HAL_GetTick() - wait_start) < 15000UL) {
+                                    if (ipcc_m0_received(IPCC_CH_COMMAND)) {
+                                        ipcc_m0_clear(IPCC_CH_COMMAND);
+                                        m4_done = true;
+                                        break;
+                                    }
+                                    CPU2_Delay_Ms(20);
+                                }
+                                if (m4_done && SHARED_FLASH_REQ->seq == 1) {
+                                    Satellite_Send_Ack_Completed(SAT_MISSION_HK);
+                                } else {
+                                    Satellite_Send_Nack(0x0A, SAT_MISSION_HK);
+                                }
+                                m4_ack_already_handled = true;
                             }
                         } else if (is_adcs_cmd || is_epdm_cmd) {
                             uint8_t mid = is_adcs_cmd ? SAT_MISSION_ADCS : SAT_MISSION_EPDM;
-                            const char *cname = is_adcs_cmd ? "ADCS RUN" : "EPDM RUN";
-                            uart1_printf("\r\n>>> [M0+ DOWNLINK] %s -> DOWNLINKING ACK (0xAC) <<<\r\n", cname);
+                            const char *cname = is_adcs_cmd ? "ADCS RUN" : "EPDM RUN (3.3V ONLY, 1 MIN)";
+                            uart1_printf("\r\n>>> [M0+ DOWNLINK] %s -> FORWARDING TO M4 <<<\r\n", cname);
                             Satellite_Send_Ack_Accepted(mid);
+                            Satellite_GMSK_Release();
+                            SHARED_FLASH_REQ->seq = 0;
                             Sat_Forward_Command_To_M4(payload_ptr, payload_len);
-                            Satellite_Send_Ack_Completed(mid);
+                            {
+                                uint32_t wait_ms = 75000UL; /* Both ADCS & EPDM run 1 min (60 s + margin) */
+                                uint32_t wait_start = HAL_GetTick();
+                                bool m4_done = false;
+                                while ((HAL_GetTick() - wait_start) < wait_ms) {
+                                    if (ipcc_m0_received(IPCC_CH_COMMAND)) {
+                                        ipcc_m0_clear(IPCC_CH_COMMAND);
+                                        m4_done = true;
+                                        break;
+                                    }
+                                    CPU2_Delay_Ms(20);
+                                }
+                                if (m4_done && SHARED_FLASH_REQ->seq == 1) {
+                                    Satellite_Send_Ack_Completed(mid);
+                                } else {
+                                    Satellite_Send_Nack(SAT_ERR_DATA_MISSING, mid);
+                                }
+                                m4_ack_already_handled = true;
+                            }
                         } else if (is_ping_cmd) {
                             uart1_puts("\r\n>>> [M0+ DOWNLINK] PING RESPONSE <<<\r\n");
                             Satellite_Send_Ack_Accepted(SAT_MISSION_UNKNOWN);
@@ -1231,6 +1282,20 @@ int main(void) {
                             Satellite_Drain_Telemetry(b1_data, b2_data);
                             Satellite_Send_HK_Combined_Packet(b1_data, b2_data);
                             Satellite_Send_Ack_Completed(SAT_MISSION_HK);
+                        }
+                        /* Wait for M4 to confirm all streaming/flash tasks are finished via IPCC */
+                        if (!m4_ack_already_handled && payload_len >= 8 && payload_ptr[0] == 0x53) {
+                            uart1_puts("\r\n>>> [M0+] ALL PACKETS SENT. WAITING FOR M4 IPCC ACK TO COMPLETE MISSION... <<<\r\n");
+                            uint32_t ack_wait_start = HAL_GetTick();
+                            while (!ipcc_m0_received(IPCC_CH_COMMAND) && (HAL_GetTick() - ack_wait_start) < 6000UL) {
+                                CPU2_Delay_Ms(10);
+                            }
+                            if (ipcc_m0_received(IPCC_CH_COMMAND)) {
+                                ipcc_m0_clear(IPCC_CH_COMMAND);
+                                uart1_puts(">>> [M0+] M4 IPCC ACK CONFIRMED: M4 completed all operations! <<<\r\n");
+                            } else {
+                                uart1_puts(">>> [M0+] M4 IPCC ACK wait finished (timeout reached). <<<\r\n");
+                            }
                         }
                     }
                 } else if (opcode == CMD_REQUEST_BURST || opcode == 0x01) {
@@ -1319,21 +1384,6 @@ int main(void) {
                     } else {
                         uart1_puts("UNKNOWN OPCODE - SENDING NACK\r\n");
                         Satellite_Send_Nack(SAT_ERR_INVALID_CMD, SAT_MISSION_UNKNOWN);
-                    }
-                }
-
-                /* Wait for M4 to confirm all streaming/flash tasks are finished via IPCC */
-                if (payload_len >= 8 && payload_ptr[0] == 0x53) {
-                    uart1_puts("\r\n>>> [M0+] ALL PACKETS SENT. WAITING FOR M4 IPCC ACK TO COMPLETE MISSION... <<<\r\n");
-                    uint32_t ack_wait_start = HAL_GetTick();
-                    while (!ipcc_m0_received(IPCC_CH_COMMAND) && (HAL_GetTick() - ack_wait_start) < 6000UL) {
-                        CPU2_Delay_Ms(10);
-                    }
-                    if (ipcc_m0_received(IPCC_CH_COMMAND)) {
-                        ipcc_m0_clear(IPCC_CH_COMMAND);
-                        uart1_puts(">>> [M0+] M4 IPCC ACK CONFIRMED: M4 completed all operations! <<<\r\n");
-                    } else {
-                        uart1_puts(">>> [M0+] M4 IPCC ACK wait finished (timeout reached). <<<\r\n");
                     }
                 }
 

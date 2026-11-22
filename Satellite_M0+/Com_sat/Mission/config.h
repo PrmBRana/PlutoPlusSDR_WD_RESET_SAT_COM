@@ -15,18 +15,18 @@ extern "C" {
  *
  * Satellite:
  *
- *     TX = 435.000 MHz
- *     RX = 437.375 MHz
+ *     TX = 437.375 MHz (Downlink)
+ *     RX = 435.313 MHz (Uplink)
  *
  * Ground station must use:
  *
- *     TX = 437.375 MHz
- *     RX = 435.000 MHz
+ *     TX = 435.313 MHz (Uplink)
+ *     RX = 437.375 MHz (Downlink)
  * ============================================================
  */
 
-#define DEFAULT_TX_FREQUENCY_HZ        435000000UL
-#define DEFAULT_RX_FREQUENCY_HZ        437375000UL
+#define DEFAULT_TX_FREQUENCY_HZ        437375000UL
+#define DEFAULT_RX_FREQUENCY_HZ        435313000UL
 #define DEFAULT_GMSK_TX_FREQ_HZ        437375000UL
 
 /*
@@ -69,7 +69,7 @@ extern "C" {
  * 0x03 provides safe +14 dBm drive without the excessive peak current spikes of 0x04,
  * eliminating brownout reset on current-limited 3.3V rails.
  */
-#define RADIO_GMSK_5V_PA_DUTY          0x03
+#define RADIO_GMSK_5V_PA_DUTY          0x04
 
 /*
  * External Power Amplifier mapping (fixed by hardware, both fed from RFO_LP / PB2):

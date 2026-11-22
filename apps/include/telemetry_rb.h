@@ -20,7 +20,7 @@
 #define TELEM_FOOTER_ADC1       0xAA55  /* Footer 1 for ADC 1 packet */
 #define TELEM_FOOTER_ADC2       0xBB66  /* Footer 2 for ADC 2 + IMU packet */
 
-#define TELEM_RB_DEPTH          16
+#define TELEM_RB_DEPTH          1
 
 /* ADC 1 Packet: 16 channels x 2B (scaled x100) + 2B Footer = 34 Bytes */
 struct adc1_packet_s

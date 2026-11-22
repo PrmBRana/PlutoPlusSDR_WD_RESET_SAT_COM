@@ -1,372 +1,570 @@
+/****************************************************************************
+ * apps/examples/OBC_main/ring_buffer.c
+ *
+ * Unified Single Ring Buffer + Semaphore + Single-Active-Mount LittleFS
+ * Storage Manager for all 11 MT25Q external flash partitions.
+ ****************************************************************************/
+
 #include "ring_buffer.h"
+
 #include <stdio.h>
+#include <stdlib.h>
+#include <malloc.h>
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <time.h>
+#include <semaphore.h>
 #include <sys/stat.h>
 #include <sys/mount.h>
-#include <time.h>
 #include <nuttx/mutex.h>
 
-/*
- * ring_buffer.c
- *
- * Logic mirrors the Verilog CircularBuffer exactly:
- *
- *   Verilog                     C equivalent
- *   ──────────────────────────  ─────────────────────────────────
- *   wr_en && !full  → write     rb_write()  checks count < RB_DEPTH
- *   rd_en && !empty → read      rb_read()   checks count > 0
- *   wr_ptr <= wr_ptr + 1        g_rb.wr_ptr++ then % RB_DEPTH for slot
- *   rd_ptr <= rd_ptr + 1        g_rb.rd_ptr++ then % RB_DEPTH for slot
- *   count +1 / -1 / hold        count updated after every write/read
- *   full  = (count == DEPTH)    rb_full()
- *   empty = (count == 0)        rb_empty()
- */
-
-static struct ring_buffer_s g_rb;
-static mutex_t              g_rb_lock;
-static bool                 g_rb_initialized = false;
-
-/* ------------------------------------------------------------------ */
-void rb_init(void)
-{
-  if (!g_rb_initialized)
-    {
-      memset(&g_rb, 0, sizeof(g_rb));
-      g_rb.wr_ptr = 0;
-      g_rb.rd_ptr = 0;
-      g_rb.count  = 0;
-      nxmutex_init(&g_rb_lock);
-      g_rb_initialized = true;
-    }
-}
-
-/* ------------------------------------------------------------------ */
-/*  Write one chunk                                                    */
-/*  Verilog: if (wr_en && !full) { mem[wr_ptr] <= wr_data;           */
-/*                                  wr_ptr <= wr_ptr + 1; count++ }  */
-/* ------------------------------------------------------------------ */
-int rb_write(const struct image_chunk_s *c)
-{
-  if (!c) return -1;
-
-  nxmutex_lock(&g_rb_lock);
-
-  /* full check — mirrors: assign full = (count == DEPTH) */
-  if (g_rb.count >= RB_DEPTH)
-    {
-      nxmutex_unlock(&g_rb_lock);
-      return -1;   /* full — caller retries */
-    }
-
-  uint32_t slot = g_rb.wr_ptr % RB_DEPTH;           /* slot index      */
-  memcpy(&g_rb.slots[slot], c, sizeof(*c));
-  g_rb.wr_ptr++;                                     /* advance pointer */
-  g_rb.count++;                                      /* update count    */
-
-  nxmutex_unlock(&g_rb_lock);
-  return 0;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Read one chunk                                                     */
-/*  Verilog: if (rd_en && !empty) { rd_data = mem[rd_ptr];           */
-/*                                   rd_ptr <= rd_ptr + 1; count-- } */
-/* ------------------------------------------------------------------ */
-int rb_read(struct image_chunk_s *c)
-{
-  if (!c) return -1;
-
-  nxmutex_lock(&g_rb_lock);
-
-  /* empty check — mirrors: assign empty = (count == 0) */
-  if (g_rb.count == 0)
-    {
-      nxmutex_unlock(&g_rb_lock);
-      return -1;   /* empty — caller retries */
-    }
-
-  uint32_t slot = g_rb.rd_ptr % RB_DEPTH;           /* slot index      */
-  memcpy(c, &g_rb.slots[slot], sizeof(*c));
-  g_rb.rd_ptr++;                                     /* advance pointer */
-  g_rb.count--;                                      /* update count    */
-
-  nxmutex_unlock(&g_rb_lock);
-  return 0;
-}
-
-/* ------------------------------------------------------------------ */
-int rb_count(void)
-{
-  nxmutex_lock(&g_rb_lock);
-  int n = (int)g_rb.count;
-  nxmutex_unlock(&g_rb_lock);
-  return n;
-}
-
-int rb_full(void)
-{
-  nxmutex_lock(&g_rb_lock);
-  int f = (g_rb.count >= RB_DEPTH) ? 1 : 0;
-  nxmutex_unlock(&g_rb_lock);
-  return f;
-}
-
-int rb_empty(void)
-{
-  nxmutex_lock(&g_rb_lock);
-  int e = (g_rb.count == 0) ? 1 : 0;
-  nxmutex_unlock(&g_rb_lock);
-  return e;
-}
-
 /* ========================================================================= */
-/* Telemetry Ring Buffer Implementation (Shared Inter-App)                   */
+/* Partition Table (Matches stm32_boot.c 11 MT25Q MTD Partitions)            */
 /* ========================================================================= */
 
-#include <telemetry_rb.h>
+struct storage_part_desc_s
+{
+  const char *name;
+  const char *dev_path;
+  const char *mnt_path;
+  const char *file_path;
+};
+
+static const struct storage_part_desc_s g_storage_parts[STORAGE_PART_COUNT] =
+{
+  [STORAGE_PART_HK1]       = { "HK1",       "/dev/hk1",       "/mnt/hk1",       "/mnt/hk1/telemetry.bin"      },
+  [STORAGE_PART_HK2]       = { "HK2",       "/dev/hk2",       "/mnt/hk2",       "/mnt/hk2/imu.bin"            },
+  [STORAGE_PART_ADCS]      = { "ADCS",      "/dev/adcs",      "/mnt/adcs",      "/mnt/adcs/adcs.bin"          },
+  [STORAGE_PART_CAM_RGB]   = { "CAM_RGB",   "/dev/cam_rgb",   "/mnt/cam_rgb",   "/mnt/cam_rgb/capture_01.raw" },
+  [STORAGE_PART_CAM_NIR]   = { "CAM_NIR",   "/dev/cam_nir",   "/mnt/cam_nir",   "/mnt/cam_nir/capture_02.raw" },
+  [STORAGE_PART_EPDM]      = { "EPDM",      "/dev/epdm",      "/mnt/epdm",      "/mnt/epdm/epdm.bin"          },
+  [STORAGE_PART_DPM]       = { "DPM",       "/dev/dpm",       "/mnt/dpm",       "/mnt/dpm/dpm.bin"            },
+  [STORAGE_PART_RSV_TABLE] = { "RSV_TABLE", "/dev/rsv_table", "/mnt/rsv_table", "/mnt/rsv_table/rsv.bin"      },
+  [STORAGE_PART_IMP_FLAGS] = { "IMP_FLAGS", "/dev/imp_flags", "/mnt/imp_flags", "/mnt/imp_flags/flags.bin"    },
+  [STORAGE_PART_PART_SIZE] = { "PART_SIZE", "/dev/part_size", "/mnt/part_size", "/mnt/part_size/size.bin"     },
+  [STORAGE_PART_SEEK_PTR]  = { "SEEK_PTR",  "/dev/seek_ptr",  "/mnt/seek_ptr",  "/mnt/seek_ptr/seek.bin"      },
+};
+
+/* ========================================================================= */
+/* ONE Unified Ring Buffer + Two Semaphores (Items Ready / Free Slots)       */
+/* ========================================================================= */
+
+struct storage_rb_s
+{
+  struct storage_item_s slots[STORAGE_RB_DEPTH];
+  volatile uint32_t     wr_ptr;
+  volatile uint32_t     rd_ptr;
+  volatile uint32_t     count;
+};
+
+static struct storage_rb_s g_storage_rb;
+static mutex_t             g_storage_lock      = NXMUTEX_INITIALIZER;
+static sem_t               g_storage_items_sem; /* Wakes consumer when data ready */
+static sem_t               g_storage_space_sem; /* Backpressure when queue full   */
+static bool                g_storage_inited    = false;
+static volatile bool       g_consumer_running  = false;
+
+/* Single-active-mount LittleFS state (ONLY 1 partition mounted at a time) */
+
+static mutex_t             g_flash_io_lock     = NXMUTEX_INITIALIZER;
+static uint8_t             g_active_part       = STORAGE_PART_NONE;
+static int                 g_active_fd         = -1;
+static size_t              g_active_written    = 0;
+
+/* Exported legacy symbols required by apps/include/telemetry_rb.h */
 
 struct telemetry_rb_s g_telemetry_rb;
 sem_t                 g_telemetry_sem;
-static mutex_t        g_telem_lock;
-static bool           g_telem_initialized = false;
-
-void telemetry_rb_init(void)
-{
-  if (!g_telem_initialized)
-    {
-      nxmutex_init(&g_telem_lock);
-      memset(&g_telemetry_rb, 0, sizeof(g_telemetry_rb));
-      sem_init(&g_telemetry_sem, 0, 0);
-      g_telem_initialized = true;
-    }
-}
-
-int telemetry_rb_write(const struct telemetry_envelope_s *data)
-{
-  if (!data)
-    {
-      return -1;
-    }
-
-  nxmutex_lock(&g_telem_lock);
-
-  if (g_telemetry_rb.count >= TELEM_RB_DEPTH)
-    {
-      /* Buffer full: drop oldest packet */
-      g_telemetry_rb.rd_ptr = (g_telemetry_rb.rd_ptr + 1) % TELEM_RB_DEPTH;
-      g_telemetry_rb.count--;
-    }
-
-  uint32_t slot = g_telemetry_rb.wr_ptr % TELEM_RB_DEPTH;
-  g_telemetry_rb.slots[slot] = *data;
-  g_telemetry_rb.wr_ptr++;
-  g_telemetry_rb.count++;
-
-  nxmutex_unlock(&g_telem_lock);
-  return 0;
-}
-
-int telemetry_rb_read(struct telemetry_envelope_s *data)
-{
-  if (!data)
-    {
-      return -1;
-    }
-
-  nxmutex_lock(&g_telem_lock);
-
-  if (g_telemetry_rb.count == 0)
-    {
-      nxmutex_unlock(&g_telem_lock);
-      return -1; /* Empty */
-    }
-
-  uint32_t slot = g_telemetry_rb.rd_ptr % TELEM_RB_DEPTH;
-  *data = g_telemetry_rb.slots[slot];
-  g_telemetry_rb.rd_ptr++;
-  g_telemetry_rb.count--;
-
-  nxmutex_unlock(&g_telem_lock);
-  return 0;
-}
-
-int telemetry_rb_count(void)
-{
-  nxmutex_lock(&g_telem_lock);
-  int c = (int)g_telemetry_rb.count;
-  nxmutex_unlock(&g_telem_lock);
-  return c;
-}
 
 /* ========================================================================= */
-/* Camera Ring Buffer -> Flash CAM Partition (/mnt/camera) Consumer Helpers  */
+/* Internal Single-Mount Flash Helpers (caller holds g_flash_io_lock)        */
 /* ========================================================================= */
 
-static mutex_t g_cam_flash_lock = NXMUTEX_INITIALIZER;
-static int     g_cam_fd[3]      = { -1, -1, -1 };
-static size_t  g_cam_written[3] = { 0, 0, 0 };
-static bool    g_cam_mounted    = false;
-
-int ensure_camera_partition_mounted(void)
+static void storage_close_and_unmount_locked(void)
 {
-  struct stat st;
+  if (g_active_fd >= 0)
+    {
+      fsync(g_active_fd);
+      close(g_active_fd);
+      g_active_fd = -1;
+    }
 
-  if (g_cam_mounted && stat("/mnt/camera", &st) == 0)
+  if (g_active_part < STORAGE_PART_COUNT)
+    {
+      umount(g_storage_parts[g_active_part].mnt_path);
+      g_active_part = STORAGE_PART_NONE;
+      g_active_written = 0;
+    }
+}
+
+static int storage_mount_locked(uint8_t part)
+{
+  if (part >= STORAGE_PART_COUNT)
+    {
+      return -EINVAL;
+    }
+
+  if (g_active_part == part)
     {
       return 0;
     }
 
-  if (stat("/mnt/camera", &st) != 0)
+  /* Unmount any previously active partition FIRST so only 1 mount exists in RAM */
+
+  storage_close_and_unmount_locked();
+
+  const struct storage_part_desc_s *p = &g_storage_parts[part];
+  struct stat st;
+
+  mkdir("/mnt", 0777);
+  if (stat(p->mnt_path, &st) != 0)
     {
-      mkdir("/mnt/camera", 0777);
+      mkdir(p->mnt_path, 0777);
     }
 
-  int ret = mount("/dev/camera", "/mnt/camera", "littlefs", 0, "autoformat");
+  int ret = mount(p->dev_path, p->mnt_path, "littlefs", 0, "autoformat");
   if (ret < 0)
     {
       int err = errno;
       if (err == EBUSY || err == EEXIST || err == ENOTDIR)
         {
-          g_cam_mounted = true;
+          g_active_part = part;
           return 0;
         }
 
-      if (stat("/dev/camera", &st) == 0)
+      if (err == ENOMEM)
         {
-          printf("[LITTLEFS CAM] WARN: autoformat /dev/camera failed (errno=%d), trying forceformat...\n", err);
-          ret = mount("/dev/camera", "/mnt/camera", "littlefs", 0, "forceformat");
-          if (ret == 0 || errno == EBUSY || errno == EEXIST || errno == ENOTDIR)
-            {
-              g_cam_mounted = true;
-              return 0;
-            }
-          err = errno;
+          struct mallinfo mi = mallinfo();
+          printf("[STORAGE] ERROR: mount(%s) ENOMEM (heap free=%d B, largest=%d B)\n",
+                 p->dev_path, mi.fordblks, mi.mxordblk);
+          return -ENOMEM;
         }
-      return -err;
+
+      printf("[STORAGE] WARN: autoformat %s failed (errno=%d), trying forceformat...\n",
+             p->dev_path, err);
+      ret = mount(p->dev_path, p->mnt_path, "littlefs", 0, "forceformat");
+      if (ret < 0)
+        {
+          err = errno;
+          if (err != EBUSY && err != EEXIST && err != ENOTDIR)
+            {
+              printf("[STORAGE] ERROR: forceformat %s failed (errno=%d)\n",
+                     p->dev_path, err);
+              return -err;
+            }
+        }
     }
 
-  g_cam_mounted = true;
+  g_active_part = part;
+  g_active_written = 0;
   return 0;
 }
 
-void cam_rb_drain_to_flash(void)
+static void storage_write_item_locked(const struct storage_item_s *item)
 {
-  struct image_chunk_s chunk;
-
-  if (rb_empty())
+  if (item == NULL || item->part >= STORAGE_PART_COUNT)
     {
       return;
     }
 
-  nxmutex_lock(&g_cam_flash_lock);
-  ensure_camera_partition_mounted();
+  const struct storage_part_desc_s *p = &g_storage_parts[item->part];
 
-  while (rb_read(&chunk) == 0)
+  if (storage_mount_locked(item->part) < 0)
     {
-      uint32_t fid = (chunk.frame_id == 2) ? 2 : 1;
-      const char *path = (fid == 2) ? "/mnt/camera/capture_02.raw"
-                                    : "/mnt/camera/capture_01.raw";
+      return;
+    }
 
-      if (chunk.is_meta)
+  /* Truncate / open new file when requested */
+
+  if ((item->flags & STORAGE_FLAG_TRUNC) != 0U)
+    {
+      if (g_active_fd >= 0)
         {
-          if (g_cam_fd[fid] >= 0)
+          fsync(g_active_fd);
+          close(g_active_fd);
+          g_active_fd = -1;
+        }
+
+      g_active_written = 0;
+      g_active_fd = open(p->file_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+      if (g_active_fd < 0)
+        {
+          /* Recover from corrupt FS by forceformatting once */
+          umount(p->mnt_path);
+          g_active_part = STORAGE_PART_NONE;
+          if (mount(p->dev_path, p->mnt_path, "littlefs", 0, "forceformat") == 0)
             {
-              fsync(g_cam_fd[fid]);
-              close(g_cam_fd[fid]);
-              g_cam_fd[fid] = -1;
+              g_active_part = item->part;
+              g_active_fd = open(p->file_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
             }
-          g_cam_written[fid] = 0;
-          g_cam_fd[fid] = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-          if (g_cam_fd[fid] < 0)
+        }
+
+      if (g_active_fd < 0)
+        {
+          printf("[STORAGE] ERROR: open(%s, TRUNC) failed (errno=%d)\n",
+                 p->file_path, errno);
+          storage_close_and_unmount_locked();
+          return;
+        }
+    }
+  else if (g_active_fd < 0)
+    {
+      g_active_fd = open(p->file_path, O_WRONLY | O_CREAT | O_APPEND, 0666);
+      if (g_active_fd < 0)
+        {
+          umount(p->mnt_path);
+          g_active_part = STORAGE_PART_NONE;
+          if (mount(p->dev_path, p->mnt_path, "littlefs", 0, "forceformat") == 0)
             {
-              g_cam_mounted = false;
-              umount("/mnt/camera");
-              mount("/dev/camera", "/mnt/camera", "littlefs", 0, "forceformat");
-              g_cam_mounted = true;
-              g_cam_fd[fid] = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+              g_active_part = item->part;
+              g_active_fd = open(p->file_path, O_WRONLY | O_CREAT | O_APPEND, 0666);
+            }
+        }
+
+      if (g_active_fd < 0)
+        {
+          printf("[STORAGE] ERROR: open(%s, APPEND) failed (errno=%d)\n",
+                 p->file_path, errno);
+          storage_close_and_unmount_locked();
+          return;
+        }
+    }
+
+  /* Write payload bytes */
+
+  if (item->len > 0 && g_active_fd >= 0)
+    {
+      ssize_t w = write(g_active_fd, item->data, item->len);
+      if (w > 0)
+        {
+          g_active_written += (size_t)w;
+          if (item->part == STORAGE_PART_ADCS ||
+              (g_active_written % 2048U) < (size_t)w)
+            {
+              printf("[STORAGE %s] Stored +%zd B -> %s (total=%u B)\n",
+                     p->name, w, p->file_path, (unsigned)g_active_written);
+            }
+        }
+      else
+        {
+          printf("[STORAGE] ERROR: write(%s, %u B) failed (errno=%d)\n",
+                 p->file_path, (unsigned)item->len, errno);
+        }
+    }
+
+  /* Finalize stream: fsync, close, log size, and unmount to free RAM */
+
+  if ((item->flags & STORAGE_FLAG_FINAL) != 0U)
+    {
+      if (g_active_fd >= 0)
+        {
+          fsync(g_active_fd);
+          close(g_active_fd);
+          g_active_fd = -1;
+        }
+
+      struct stat st;
+      long disk_sz = (stat(p->file_path, &st) == 0) ? (long)st.st_size : -1L;
+      if (disk_sz > 0)
+        {
+          printf("[STORAGE %s] SUCCESSFULLY STORED in external flash -> %s (verified file size: %ld B)\n",
+                 p->name, p->file_path, disk_sz);
+        }
+      else
+        {
+          printf("[STORAGE %s] FAILED to store data in external flash -> %s (written=%u B, file size=%ld B)\n",
+                 p->name, p->file_path, (unsigned)g_active_written, disk_sz);
+        }
+
+      storage_close_and_unmount_locked();
+    }
+}
+
+/* Pop one item non-blocking (internal helper) */
+
+static int storage_rb_pop_nowait(struct storage_item_s *out)
+{
+  nxmutex_lock(&g_storage_lock);
+  if (g_storage_rb.count == 0)
+    {
+      nxmutex_unlock(&g_storage_lock);
+      return -1;
+    }
+
+  uint32_t slot = g_storage_rb.rd_ptr & (STORAGE_RB_DEPTH - 1U);
+  *out = g_storage_rb.slots[slot];
+  g_storage_rb.rd_ptr++;
+  g_storage_rb.count--;
+  nxmutex_unlock(&g_storage_lock);
+
+  sem_post(&g_storage_space_sem);
+  return 0;
+}
+
+/* ========================================================================= */
+/* Unified Ring Buffer Public API                                            */
+/* ========================================================================= */
+
+void storage_rb_init(void)
+{
+  if (!g_storage_inited)
+    {
+      memset(&g_storage_rb, 0, sizeof(g_storage_rb));
+      sem_init(&g_storage_items_sem, 0, 0);
+      sem_init(&g_storage_space_sem, 0, STORAGE_RB_DEPTH);
+      sem_init(&g_telemetry_sem, 0, 0);
+      g_storage_inited = true;
+    }
+}
+
+int storage_rb_push(storage_part_t part, uint8_t flags,
+                    const void *data, uint16_t len)
+{
+  if (part >= STORAGE_PART_COUNT || len > STORAGE_CHUNK_SIZE)
+    {
+      return -EINVAL;
+    }
+
+  storage_rb_init();
+
+  /* If no background consumer is running and buffer is full, drain 1 slot
+   * synchronously so we never block or lose data in standalone mode.
+   */
+  if (!g_consumer_running)
+    {
+      if (sem_trywait(&g_storage_space_sem) < 0)
+        {
+          struct storage_item_s tmp;
+          if (storage_rb_pop_nowait(&tmp) == 0)
+            {
+              nxmutex_lock(&g_flash_io_lock);
+              storage_write_item_locked(&tmp);
+              nxmutex_unlock(&g_flash_io_lock);
+            }
+          if (sem_trywait(&g_storage_space_sem) < 0)
+            {
+              return -EAGAIN;
+            }
+        }
+    }
+  else
+    {
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      ts.tv_sec += 2;
+      if (sem_timedwait(&g_storage_space_sem, &ts) < 0)
+        {
+          return -ETIMEDOUT;
+        }
+    }
+
+  nxmutex_lock(&g_storage_lock);
+  uint32_t slot = g_storage_rb.wr_ptr & (STORAGE_RB_DEPTH - 1U);
+  g_storage_rb.slots[slot].part  = (uint8_t)part;
+  g_storage_rb.slots[slot].flags = flags;
+  g_storage_rb.slots[slot].len   = len;
+  if (len > 0 && data != NULL)
+    {
+      memcpy(g_storage_rb.slots[slot].data, data, len);
+    }
+  g_storage_rb.wr_ptr++;
+  g_storage_rb.count++;
+  nxmutex_unlock(&g_storage_lock);
+
+  /* Notify single storage consumer via semaphore */
+
+  sem_post(&g_storage_items_sem);
+  return 0;
+}
+
+int storage_rb_count(void)
+{
+  if (!g_storage_inited)
+    {
+      return 0;
+    }
+
+  nxmutex_lock(&g_storage_lock);
+  int n = (int)g_storage_rb.count;
+  nxmutex_unlock(&g_storage_lock);
+  return n;
+}
+
+void storage_rb_flush(void)
+{
+  storage_rb_init();
+
+  if (g_consumer_running)
+    {
+      /* Wake consumer and wait until ring buffer is empty */
+      sem_post(&g_storage_items_sem);
+      int retries = 500; /* up to 5 seconds */
+      while (storage_rb_count() > 0 && retries-- > 0)
+        {
+          usleep(10000);
+        }
+    }
+  else
+    {
+      /* Standalone mode: drain queue synchronously */
+      struct storage_item_s item;
+      nxmutex_lock(&g_flash_io_lock);
+      while (storage_rb_pop_nowait(&item) == 0)
+        {
+          storage_write_item_locked(&item);
+        }
+      nxmutex_unlock(&g_flash_io_lock);
+    }
+
+  /* Guarantee 0 active LittleFS mounts before caller opens/reads flash */
+
+  nxmutex_lock(&g_flash_io_lock);
+  storage_close_and_unmount_locked();
+  nxmutex_unlock(&g_flash_io_lock);
+}
+
+int storage_consumer_run(void)
+{
+  struct storage_item_s item;
+
+  storage_rb_init();
+  g_consumer_running = true;
+
+  printf("\n=======================================================\n");
+  printf("  [STORAGE DAEMON] Unified Ring Buffer Consumer Active\n");
+  printf("  Buffer : %d slots x %d B (%d B RAM)\n",
+         STORAGE_RB_DEPTH, STORAGE_CHUNK_SIZE,
+         STORAGE_RB_DEPTH * STORAGE_CHUNK_SIZE);
+  printf("  Policy : Single active LittleFS mount (all 11 parts)\n");
+  printf("=======================================================\n");
+
+  for (;;)
+    {
+      /* Sleep on semaphore (0% CPU). If idle for 5 seconds (longer than the
+       * 4 s EPDM silence timeout), unmount active partition so heap stays free.
+       */
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      ts.tv_sec += 5;
+
+      int wret = sem_timedwait(&g_storage_items_sem, &ts);
+      if (wret < 0 && errno == ETIMEDOUT)
+        {
+          if (storage_rb_count() == 0)
+            {
+              nxmutex_lock(&g_flash_io_lock);
+              if (g_active_part != STORAGE_PART_NONE)
+                {
+                  storage_close_and_unmount_locked();
+                }
+              nxmutex_unlock(&g_flash_io_lock);
             }
           continue;
         }
 
-      if (g_cam_fd[fid] < 0)
-        {
-          g_cam_fd[fid] = open(path, O_WRONLY | O_CREAT | O_APPEND, 0666);
-          if (g_cam_fd[fid] < 0)
-            {
-              g_cam_mounted = false;
-              umount("/mnt/camera");
-              mount("/dev/camera", "/mnt/camera", "littlefs", 0, "forceformat");
-              g_cam_mounted = true;
-              g_cam_fd[fid] = open(path, O_WRONLY | O_CREAT | O_APPEND, 0666);
-            }
-        }
+      /* Drain all queued items */
 
-      if (g_cam_fd[fid] >= 0 && chunk.len > 0)
+      while (storage_rb_pop_nowait(&item) == 0)
         {
-          ssize_t w = write(g_cam_fd[fid], chunk.data, chunk.len);
-          if (w < 0)
-            {
-              close(g_cam_fd[fid]);
-              g_cam_mounted = false;
-              umount("/mnt/camera");
-              mount("/dev/camera", "/mnt/camera", "littlefs", 0, "forceformat");
-              g_cam_mounted = true;
-              g_cam_fd[fid] = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-              if (g_cam_fd[fid] >= 0)
-                {
-                  w = write(g_cam_fd[fid], chunk.data, chunk.len);
-                }
-            }
-          if (w > 0)
-            {
-              g_cam_written[fid] += (size_t)w;
-            }
-        }
-
-      if (chunk.is_last)
-        {
-          if (g_cam_fd[fid] >= 0)
-            {
-              fsync(g_cam_fd[fid]);
-              close(g_cam_fd[fid]);
-              g_cam_fd[fid] = -1;
-            }
-          struct stat st;
-          long disk_sz = (stat(path, &st) == 0) ? (long)st.st_size : -1L;
-          printf("[LITTLEFS CAM] Stored Image %lu -> %s (%u B written, %ld B verified in Flash CAM partition)\n",
-                 (unsigned long)fid, path, (unsigned)g_cam_written[fid], disk_sz);
+          nxmutex_lock(&g_flash_io_lock);
+          storage_write_item_locked(&item);
+          nxmutex_unlock(&g_flash_io_lock);
         }
     }
 
-  nxmutex_unlock(&g_cam_flash_lock);
+  g_consumer_running = false;
+  return 0;
+}
+
+/* ========================================================================= */
+/* Legacy Camera Ring Buffer Wrappers -> Unified Ring Buffer                 */
+/* ========================================================================= */
+
+void rb_init(void)
+{
+  storage_rb_init();
+}
+
+int rb_write(const struct image_chunk_s *c)
+{
+  if (c == NULL)
+    {
+      return -1;
+    }
+
+  storage_part_t part = (c->frame_id == 2) ? STORAGE_PART_CAM_NIR
+                                           : STORAGE_PART_CAM_RGB;
+  uint8_t flags = STORAGE_FLAG_APPEND;
+  uint16_t len  = c->len;
+
+  if (c->is_meta)
+    {
+      /* Metadata marker signals start of a new image file */
+      flags |= STORAGE_FLAG_TRUNC;
+      len    = 0;
+    }
+
+  if (c->is_last)
+    {
+      flags |= STORAGE_FLAG_FINAL;
+    }
+
+  return (storage_rb_push(part, flags, c->data, len) == 0) ? 0 : -1;
+}
+
+int rb_read(struct image_chunk_s *c)
+{
+  (void)c;
+  return -1; /* Drained directly by unified storage consumer */
+}
+
+int rb_count(void)
+{
+  return storage_rb_count();
+}
+
+int rb_full(void)
+{
+  return (storage_rb_count() >= STORAGE_RB_DEPTH) ? 1 : 0;
+}
+
+int rb_empty(void)
+{
+  return (storage_rb_count() == 0) ? 1 : 0;
+}
+
+int ensure_camera_partition_mounted(void)
+{
+  /* Partitions are mounted on demand (1 at a time) to preserve SRAM */
+  return 0;
+}
+
+void unmount_camera_partitions(void)
+{
+  storage_rb_flush();
+  umount("/mnt/cam_rgb");
+  umount("/mnt/cam_nir");
+}
+
+void cam_rb_drain_to_flash(void)
+{
+  storage_rb_flush();
 }
 
 void cam_rb_close_all_files(void)
 {
-  cam_rb_drain_to_flash();
-  nxmutex_lock(&g_cam_flash_lock);
-  for (int fid = 1; fid <= 2; fid++)
-    {
-      if (g_cam_fd[fid] >= 0)
-        {
-          fsync(g_cam_fd[fid]);
-          close(g_cam_fd[fid]);
-          g_cam_fd[fid] = -1;
-        }
-    }
-  nxmutex_unlock(&g_cam_flash_lock);
+  storage_rb_flush();
 }
 
 /* ========================================================================= */
-/* HK Telemetry Ring Buffer -> Flash HK Partition (/mnt/hk) Consumer Helpers */
+/* Legacy HK Telemetry Wrappers -> Unified Ring Buffer (HK1 + HK2)           */
 /* ========================================================================= */
 
-static mutex_t  g_hk_flash_lock = NXMUTEX_INITIALIZER;
-static bool     g_hk_mounted    = false;
-static uint32_t g_hk_flash_seq  = 0;
+static struct adc1_packet_s g_cached_adc1;
+static bool                 g_have_adc1    = false;
+static uint32_t             g_hk_flash_seq = 0;
 
 static uint16_t hk_flash_crc16(const uint8_t *buf, uint16_t len)
 {
@@ -382,144 +580,103 @@ static uint16_t hk_flash_crc16(const uint8_t *buf, uint16_t len)
   return crc;
 }
 
-int ensure_hk_partition_mounted(void)
+void telemetry_rb_init(void)
 {
-  struct stat st;
+  storage_rb_init();
+}
 
-  if (g_hk_mounted && stat("/mnt/hk", &st) == 0)
+int telemetry_rb_write(const struct telemetry_envelope_s *data)
+{
+  if (data == NULL)
     {
+      return -1;
+    }
+
+  storage_rb_init();
+
+  if (data->footer == TELEM_FOOTER_ADC1)
+    {
+      g_cached_adc1 = data->pkt.adc1;
+      g_have_adc1   = true;
       return 0;
     }
 
-  if (stat("/mnt/hk", &st) != 0)
+  if (data->footer == TELEM_FOOTER_ADC2)
     {
-      mkdir("/mnt/hk", 0777);
+      uint8_t hk128[128];
+      memset(hk128, 0, sizeof(hk128));
+
+      if (g_have_adc1)
+        {
+          memcpy(&hk128[0], g_cached_adc1.data, 32);
+        }
+      hk128[32] = 0x55;
+      hk128[33] = 0xAA;
+
+      memcpy(&hk128[34], data->pkt.adc2.data, 24);
+      memcpy(&hk128[58], &data->pkt.adc2.gyro_x, 12);
+      hk128[70] = 0x66;
+      hk128[71] = 0xBB;
+
+      g_hk_flash_seq++;
+      struct timespec ts;
+      clock_gettime(CLOCK_MONOTONIC, &ts);
+      uint32_t now_ms = (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+
+      memcpy(&hk128[72], &g_hk_flash_seq, 4);
+      memcpy(&hk128[76], &now_ms, 4);
+
+      uint16_t crc = hk_flash_crc16(hk128, 124);
+      hk128[124] = (uint8_t)(crc & 0xFF);
+      hk128[125] = (uint8_t)(crc >> 8);
+      hk128[126] = 0xAA;
+      hk128[127] = 0xCC;
+
+      /* Push HK1 record into unified ring buffer */
+      storage_rb_push(STORAGE_PART_HK1, STORAGE_FLAG_APPEND | STORAGE_FLAG_FINAL,
+                      hk128, sizeof(hk128));
+
+      /* Pack and push HK2 (Mag & Gyro) record into unified ring buffer */
+      uint8_t hk2_128[128];
+      memset(hk2_128, 0, sizeof(hk2_128));
+      memcpy(&hk2_128[0], &data->pkt.adc2.gyro_x, 12);
+      hk2_128[70] = 0x66;
+      hk2_128[71] = 0xBB;
+      memcpy(&hk2_128[72], &g_hk_flash_seq, 4);
+      memcpy(&hk2_128[76], &now_ms, 4);
+
+      uint16_t crc2 = hk_flash_crc16(hk2_128, 124);
+      hk2_128[124] = (uint8_t)(crc2 & 0xFF);
+      hk2_128[125] = (uint8_t)(crc2 >> 8);
+      hk2_128[126] = 0xAA;
+      hk2_128[127] = 0xCC;
+
+      storage_rb_push(STORAGE_PART_HK2, STORAGE_FLAG_APPEND | STORAGE_FLAG_FINAL,
+                      hk2_128, sizeof(hk2_128));
+      return 0;
     }
 
-  int ret = mount("/dev/hk", "/mnt/hk", "littlefs", 0, "autoformat");
-  if (ret < 0)
-    {
-      int err = errno;
-      if (err == EBUSY || err == EEXIST || err == ENOTDIR)
-        {
-          g_hk_mounted = true;
-          return 0;
-        }
+  return -1;
+}
 
-      if (stat("/dev/hk", &st) == 0)
-        {
-          printf("[LITTLEFS HK] WARN: autoformat /dev/hk failed (errno=%d), trying forceformat...\n", err);
-          ret = mount("/dev/hk", "/mnt/hk", "littlefs", 0, "forceformat");
-          if (ret == 0 || errno == EBUSY || errno == EEXIST || errno == ENOTDIR)
-            {
-              g_hk_mounted = true;
-              return 0;
-            }
-          err = errno;
-        }
-      return -err;
-    }
+int telemetry_rb_read(struct telemetry_envelope_s *data)
+{
+  (void)data;
+  return -1; /* Drained directly by unified storage consumer */
+}
 
-  g_hk_mounted = true;
+int telemetry_rb_count(void)
+{
+  return storage_rb_count();
+}
+
+int ensure_hk_partition_mounted(void)
+{
+  /* Partitions are mounted on demand (1 at a time) to preserve SRAM */
   return 0;
 }
 
 void hk_rb_drain_to_flash(void)
 {
-  struct telemetry_envelope_s env;
-  static struct adc1_packet_s s_cached_adc1;
-  static bool s_have_adc1 = false;
-
-  if (telemetry_rb_count() == 0)
-    {
-      return;
-    }
-
-  nxmutex_lock(&g_hk_flash_lock);
-  ensure_hk_partition_mounted();
-
-  while (telemetry_rb_read(&env) == 0)
-    {
-      if (env.footer == TELEM_FOOTER_ADC1)
-        {
-          s_cached_adc1 = env.pkt.adc1;
-          s_have_adc1 = true;
-        }
-      else if (env.footer == TELEM_FOOTER_ADC2)
-        {
-          const char *filename = "/mnt/hk/telemetry.bin";
-          uint8_t hk128[128];
-          memset(hk128, 0, sizeof(hk128));
-
-          if (s_have_adc1)
-            {
-              memcpy(&hk128[0], s_cached_adc1.data, 32);
-            }
-          hk128[32] = 0x55;
-          hk128[33] = 0xAA;
-
-          memcpy(&hk128[34], env.pkt.adc2.data, 24);
-          memcpy(&hk128[58], &env.pkt.adc2.gyro_x, 12);
-
-          hk128[70] = 0x66;
-          hk128[71] = 0xBB;
-
-          g_hk_flash_seq++;
-          struct timespec ts;
-          clock_gettime(CLOCK_MONOTONIC, &ts);
-          uint32_t now_ms = (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
-
-          memcpy(&hk128[72], &g_hk_flash_seq, 4);
-          memcpy(&hk128[76], &now_ms, 4);
-
-          uint16_t crc = hk_flash_crc16(hk128, 124);
-          hk128[124] = (uint8_t)(crc & 0xFF);
-          hk128[125] = (uint8_t)(crc >> 8);
-
-          hk128[126] = 0xAA;
-          hk128[127] = 0xCC;
-
-          int fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0666);
-          if (fd < 0)
-            {
-              g_hk_mounted = false;
-              umount("/mnt/hk");
-              mount("/dev/hk", "/mnt/hk", "littlefs", 0, "forceformat");
-              g_hk_mounted = true;
-              fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0666);
-            }
-
-          if (fd >= 0)
-            {
-              ssize_t written = write(fd, hk128, sizeof(hk128));
-              fsync(fd);
-              close(fd);
-
-              if (written < 0)
-                {
-                  g_hk_mounted = false;
-                  umount("/mnt/hk");
-                  mount("/dev/hk", "/mnt/hk", "littlefs", 0, "forceformat");
-                  g_hk_mounted = true;
-                  fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0666);
-                  if (fd >= 0)
-                    {
-                      written = write(fd, hk128, sizeof(hk128));
-                      fsync(fd);
-                      close(fd);
-                    }
-                }
-
-              if (written == (ssize_t)sizeof(hk128))
-                {
-                  struct stat st;
-                  long fsz = (stat(filename, &st) == 0) ? (long)st.st_size : -1L;
-                  printf("[LITTLEFS HK] Stored 128B HK Record #%lu -> %s (File Size: %ld B, %ld Records)\n",
-                         (unsigned long)g_hk_flash_seq, filename, fsz, (fsz > 0) ? (fsz / 128) : 0L);
-                }
-            }
-        }
-    }
-
-  nxmutex_unlock(&g_hk_flash_lock);
+  storage_rb_flush();
 }

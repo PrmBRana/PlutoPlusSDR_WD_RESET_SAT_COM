@@ -42,6 +42,7 @@
  ****************************************************************************/
 
 #include <nuttx/config.h>
+#include <nuttx/irq.h>
 
 #include <stdio.h>
 #include <stdint.h>
@@ -55,8 +56,10 @@
 #include <errno.h>
 #include <semaphore.h>
 #include <sys/ioctl.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <nuttx/mtd/mtd.h>
 
 #include <nuttx/analog/adc.h>
 #include <nuttx/analog/ioctl.h>
@@ -1271,7 +1274,7 @@ static bool check_camera_data_available(void)
 {
   DIR *d;
 
-  d = opendir("/mnt/camera");
+  d = opendir("/mnt/cam_rgb");
 
   if (!d)
     {
@@ -1292,7 +1295,7 @@ static bool check_camera_data_available(void)
 
             snprintf(path,
                      sizeof(path),
-                     "/mnt/camera/%s",
+                     "/mnt/cam_rgb/%s",
                      de->d_name);
 
             if (stat(path, &st) == 0 &&
@@ -1311,8 +1314,8 @@ static bool check_camera_data_available(void)
 }
 
 #define CAM_UART_DEV              "/dev/ttyS1" /* LPUART1: PC0 (RX), PC1 (TX) */
-#define CAM_FLASH_STORAGE_PATH    "/mnt/camera/capture_01.raw"
-#define CAM_FLASH_STORAGE_PATH2   "/mnt/camera/capture_02.raw"
+#define CAM_FLASH_STORAGE_PATH    "/mnt/cam_rgb/capture_01.raw"
+#define CAM_FLASH_STORAGE_PATH2   "/mnt/cam_nir/capture_02.raw"
 
 /* Real camera timing on LPUART1 (PC0 RX / PC1 TX):
  * 1. Send handshake command "CAM" and receive "CAM" back (handshake success).
@@ -1401,16 +1404,133 @@ static void flush_cam_write_buf_to_rb(uint32_t frame_id, uint8_t *write_buf,
   *write_buf_len = 0;
 }
 
-/* Hardware registers for STM32WL55 LPUART1 on PC0 (RX, AF8) and PC1 (TX, AF8) */
+/* Hardware registers for STM32WL55 GPIOA / GPIOC / LPUART1 (PC0 RX, PC1 TX) */
 #define WL55_RCC_AHB2ENR          (*(volatile uint32_t *)0x5800004CUL)
 #define WL55_RCC_APB1ENR2         (*(volatile uint32_t *)0x5800005CUL)
 #define WL55_RCC_CCIPR            (*(volatile uint32_t *)0x58000088UL)
+
+#define WL55_GPIOA_MODER          (*(volatile uint32_t *)0x48000000UL)
+#define WL55_GPIOA_OTYPER         (*(volatile uint32_t *)0x48000004UL)
+#define WL55_GPIOA_OSPEEDR        (*(volatile uint32_t *)0x48000008UL)
+#define WL55_GPIOA_PUPDR          (*(volatile uint32_t *)0x4800000CUL)
+#define WL55_GPIOA_ODR            (*(volatile uint32_t *)0x48000014UL)
+#define WL55_GPIOA_BSRR           (*(volatile uint32_t *)0x48000018UL)
 
 #define WL55_GPIOC_MODER          (*(volatile uint32_t *)0x48000800UL)
 #define WL55_GPIOC_OTYPER         (*(volatile uint32_t *)0x48000804UL)
 #define WL55_GPIOC_OSPEEDR        (*(volatile uint32_t *)0x48000808UL)
 #define WL55_GPIOC_PUPDR          (*(volatile uint32_t *)0x4800080CUL)
+#define WL55_GPIOC_BSRR           (*(volatile uint32_t *)0x48000818UL)
 #define WL55_GPIOC_AFRL           (*(volatile uint32_t *)0x48000820UL)
+
+/* Configure PA0 (EN 5V DC/DC & OCP), PA12 (EN 3V3 DC/DC & OCP), and PC13 (MSN Board EN)
+ * as outputs, all initially OFF (LOW) at boot to save power.
+ */
+static void obc_power_rails_init_off(void)
+{
+  irqstate_t flags = enter_critical_section();
+
+  /* Enable GPIOA (bit 0) and GPIOC (bit 2) clocks */
+  WL55_RCC_AHB2ENR |= (1UL << 0) | (1UL << 2);
+
+  /* PA0: Output (01b), Push-Pull (0), High Speed (10b), No Pull (00b) -> LOW (OFF) */
+  WL55_GPIOA_MODER   = (WL55_GPIOA_MODER   & ~(3UL << 0))  | (1UL << 0);
+  WL55_GPIOA_OTYPER &= ~(1UL << 0);
+  WL55_GPIOA_OSPEEDR = (WL55_GPIOA_OSPEEDR & ~(3UL << 0))  | (2UL << 0);
+  WL55_GPIOA_PUPDR  &= ~(3UL << 0);
+  WL55_GPIOA_BSRR    = (1UL << (0 + 16));
+
+  /* PA12: Output (01b), Push-Pull (0), High Speed (10b), No Pull (00b) -> LOW (OFF) */
+  WL55_GPIOA_MODER   = (WL55_GPIOA_MODER   & ~(3UL << 24)) | (1UL << 24);
+  WL55_GPIOA_OTYPER &= ~(1UL << 12);
+  WL55_GPIOA_OSPEEDR = (WL55_GPIOA_OSPEEDR & ~(3UL << 24)) | (2UL << 24);
+  WL55_GPIOA_PUPDR  &= ~(3UL << 24);
+  WL55_GPIOA_BSRR    = (1UL << (12 + 16));
+
+  /* PC13 (MSN Board EN): Output (01b), Push-Pull (0), High Speed (10b), No Pull (00b) -> LOW (OFF) */
+  WL55_GPIOC_MODER   = (WL55_GPIOC_MODER   & ~(3UL << 26)) | (1UL << 26);
+  WL55_GPIOC_OTYPER &= ~(1UL << 13);
+  WL55_GPIOC_OSPEEDR = (WL55_GPIOC_OSPEEDR & ~(3UL << 26)) | (2UL << 26);
+  WL55_GPIOC_PUPDR  &= ~(3UL << 26);
+  WL55_GPIOC_BSRR    = (1UL << (13 + 16));
+
+  leave_critical_section(flags);
+}
+
+/* On command: first power ON PA0 (5V DC/DC) and PA12 (3.3V DC/DC), then trigger PC13 (MSN Board).
+ * On finish: power OFF PC13, PA12 (3.3V), and PA0 (5V) to save power.
+ */
+static void obc_msn_power(bool enable)
+{
+  if (enable)
+    {
+      irqstate_t flags = enter_critical_section();
+
+      /* Ensure GPIOA/GPIOC clocks and PA0/PA12/PC13 remain configured as Output Push-Pull */
+      WL55_RCC_AHB2ENR |= (1UL << 0) | (1UL << 2);
+      WL55_GPIOA_MODER   = (WL55_GPIOA_MODER   & ~((3UL << 0) | (3UL << 24))) | (1UL << 0) | (1UL << 24);
+      WL55_GPIOA_OTYPER &= ~((1UL << 0) | (1UL << 12));
+      WL55_GPIOA_PUPDR  &= ~((3UL << 0) | (3UL << 24));
+      WL55_GPIOC_MODER   = (WL55_GPIOC_MODER   & ~(3UL << 26)) | (1UL << 26);
+      WL55_GPIOC_OTYPER &= ~(1UL << 13);
+      WL55_GPIOC_PUPDR  &= ~(3UL << 26);
+
+      /* 1. Enable 5V (PA0) and 3.3V (PA12) DC/DC & OCP rails first */
+      WL55_GPIOA_BSRR = (1UL << 0) | (1UL << 12);
+      leave_critical_section(flags);
+
+      usleep(5000); /* 5 ms DC/DC rail settle */
+
+      /* 2. Trigger PC13 (MSN Board EN) ON */
+      WL55_GPIOC_BSRR = (1UL << 13);
+
+      printf("[OBC] Rails ON check: PA0_MODER=%lu PA0_ODR=%lu PA12_ODR=%lu\n",
+             (unsigned long)(WL55_GPIOA_MODER & 0x3UL),
+             (unsigned long)(WL55_GPIOA_ODR & 0x1UL),
+             (unsigned long)((WL55_GPIOA_ODR >> 12) & 0x1UL));
+    }
+  else
+    {
+      /* Disable PC13 (MSN Board) first, then 3.3V (PA12) and 5V (PA0) */
+      WL55_GPIOC_BSRR = (1UL << (13 + 16));
+      WL55_GPIOA_BSRR = (1UL << (0 + 16)) | (1UL << (12 + 16));
+    }
+}
+
+/* EPDM power: ONLY enable 3.3V (PA12) and MSN Board (PC13) — keep 5V (PA0) OFF */
+static void obc_msn_power_3v3_only(bool enable)
+{
+  if (enable)
+    {
+      irqstate_t flags = enter_critical_section();
+
+      WL55_RCC_AHB2ENR |= (1UL << 0) | (1UL << 2);
+      WL55_GPIOA_MODER   = (WL55_GPIOA_MODER   & ~((3UL << 0) | (3UL << 24))) | (1UL << 0) | (1UL << 24);
+      WL55_GPIOA_OTYPER &= ~((1UL << 0) | (1UL << 12));
+      WL55_GPIOA_PUPDR  &= ~((3UL << 0) | (3UL << 24));
+      WL55_GPIOC_MODER   = (WL55_GPIOC_MODER   & ~(3UL << 26)) | (1UL << 26);
+      WL55_GPIOC_OTYPER &= ~(1UL << 13);
+      WL55_GPIOC_PUPDR  &= ~(3UL << 26);
+
+      /* Keep PA0 (5V) OFF, enable PA12 (3.3V) ONLY */
+      WL55_GPIOA_BSRR = (1UL << (0 + 16)) | (1UL << 12);
+      leave_critical_section(flags);
+
+      usleep(5000);
+
+      /* Trigger PC13 (MSN Board EN) ON */
+      WL55_GPIOC_BSRR = (1UL << 13);
+
+      printf("[OBC] EPDM Rails ON (3.3V ONLY): PA0(5V)=%lu PA12(3V3)=%lu PC13(MSN)=1\n",
+             (unsigned long)(WL55_GPIOA_ODR & 0x1UL),
+             (unsigned long)((WL55_GPIOA_ODR >> 12) & 0x1UL));
+    }
+  else
+    {
+      WL55_GPIOC_BSRR = (1UL << (13 + 16));
+      WL55_GPIOA_BSRR = (1UL << (0 + 16)) | (1UL << (12 + 16));
+    }
+}
 
 #define WL55_LPUART1_CR1          (*(volatile uint32_t *)0x40008000UL)
 #define WL55_LPUART1_CR2          (*(volatile uint32_t *)0x40008004UL)
@@ -1423,6 +1543,8 @@ static void flush_cam_write_buf_to_rb(uint32_t frame_id, uint8_t *write_buf,
 
 static void lpuart1_pc0_pc1_hw_setup(void)
 {
+  irqstate_t flags = enter_critical_section();
+
   /* 1. Enable GPIOC (AHB2 bit 2) and LPUART1 (APB1ENR2 bit 0) clocks;
    *    select PCLK1 (48 MHz, bits 11:10 = 00) for LPUART1 clock source.
    */
@@ -1456,6 +1578,8 @@ static void lpuart1_pc0_pc1_hw_setup(void)
   WL55_LPUART1_RQR   = (1UL << 3);  /* RXFRQ: flush hardware RX */
   WL55_LPUART1_ICR   = 0xFFFFFFFFUL;
   WL55_LPUART1_CR1   = saved_ie | (1UL << 5) | (1UL << 3) | (1UL << 2) | (1UL << 0);
+
+  leave_critical_section(flags);
 }
 
 /****************************************************************************
@@ -1482,29 +1606,17 @@ static size_t camera_capture_via_lpuart1(bool is_dummy)
   rb_init();
   ensure_camera_partition_mounted();
 
-  /* 1. First enable BIRDS Camera Power Rails:
-   *    PA0:  5V DC/DC Power Rail EN
-   *    PA12: 3.3V Logic Power Rail EN
-   *    PC13: GPIO1 / Mission1 EN
-   *    PC6:  GPIO2 / Mission2 EN
-   */
-  printf("\n[OBC_MAIN] ============================================================\n");
-  printf("[OBC_MAIN] >>> [STEP 1: BIRDS CAMERA POWER ENABLE (%s)] Enabling GPIOs:\n"
-         "            - PA0  : 5V DC/DC Power Rail -> ON\n"
-         "            - PA12 : 3.3V Logic Power Rail -> ON\n"
-         "            - PC13 : GPIO1 / Mission 1 Enable -> ON\n"
-         "            - PC6  : GPIO2 / Mission 2 Enable -> ON\n"
-         "[OBC_MAIN] ============================================================\n",
-         is_dummy ? "DUMMY CAM VIA ADCS" : "REAL CAM VIA ADCS");
-  board_camera_power(true);
+  /* 1. First enable PA0 (5V DC/DC) & PA12 (3.3V DC/DC), then trigger PC13 (MSN Board EN) */
+  printf("\n[OBC] Power ON: PA0(5V), PA12(3V3), PC13(MSN) (%s)\n",
+         is_dummy ? "Dummy" : "Real");
+  obc_msn_power(true);
 
   int fd = open(CAM_UART_DEV, O_RDWR | O_NOCTTY);
   if (fd < 0)
     {
-      printf("[OBC_MAIN] [CAMERA LPUART1] Error: Could not open %s (errno=%d).\n",
-             CAM_UART_DEV, errno);
-      printf("[OBC_MAIN] >>> [CAMERA POWER OFF] Disabling PA0 (5V), PA12 (3.3V), PC13 (Mission1), PC6 (Mission2) <<<\n");
-      board_camera_power(false);
+      printf("[OBC] Error: UART %s open failed (errno=%d)\n", CAM_UART_DEV, errno);
+      printf("[OBC] Power OFF: PC13(MSN), PA12(3V3), PA0(5V)\n");
+      obc_msn_power(false);
       unlink(CAM_FLASH_STORAGE_PATH);
       unlink(CAM_FLASH_STORAGE_PATH2);
       g_camera_capture_active = false;
@@ -1534,8 +1646,6 @@ static size_t camera_capture_via_lpuart1(bool is_dummy)
       tcflush(fd, TCIOFLUSH);
 
       /* 2. Handshake: Send "MSN" command and verify "MSN" response */
-      printf("[OBC_MAIN] >>> [STEP 2: ADCS/CAMERA HANDSHAKE] Sending 'MSN' handshake command on %s (LPUART1 PC0 RX / PC1 TX) <<<\n", CAM_UART_DEV);
-
       bool handshake_ok = false;
       const char msn_handshake_cmd[] = "MSN";
       int hs_attempts = 10; /* Up to 10 attempts, 500 ms each = 5s total */
@@ -1548,8 +1658,6 @@ static size_t camera_capture_via_lpuart1(bool is_dummy)
             }
           tcflush(fd, TCIOFLUSH);
           write(fd, msn_handshake_cmd, 3);
-          printf("[OBC_MAIN] [CAMERA LPUART1] Sent 'MSN' handshake command (attempt %d/10)...\n",
-                 10 - hs_attempts);
 
           struct timespec hs_start;
           clock_gettime(CLOCK_MONOTONIC, &hs_start);
@@ -1596,17 +1704,17 @@ static size_t camera_capture_via_lpuart1(bool is_dummy)
 
       if (!handshake_ok)
         {
-          printf("[OBC_MAIN] [CAMERA LPUART1] ERROR: Camera handshake FAILED! Did not receive 'MSN' response.\n");
-          printf("[OBC_MAIN] >>> [CAMERA POWER OFF] Disabling PA0 (5V), PA12 (3.3V), PC13 (Mission1), PC6 (Mission2) <<<\n");
+          printf("[OBC] Handshake 'MSN' FAILED\n");
+          printf("[OBC] Power OFF: PC13(MSN), PA12(3V3), PA0(5V)\n");
           close(fd);
-          board_camera_power(false);
+          obc_msn_power(false);
           unlink(CAM_FLASH_STORAGE_PATH);
           unlink(CAM_FLASH_STORAGE_PATH2);
           g_camera_capture_active = false;
           return 0;
         }
 
-      printf("[OBC_MAIN] [CAMERA LPUART1] >>> CAMERA HANDSHAKE SUCCESSFUL! Received 'MSN' from ADCS <<<\n");
+      printf("[OBC] Handshake 'MSN' OK\n");
 
       /* Allow ADCS MCU to prepare for command, then clear UART */
       usleep(50000);
@@ -1618,29 +1726,16 @@ static size_t camera_capture_via_lpuart1(bool is_dummy)
       /* 3. Send "CAM" (for Dummy Camera) or 0xCA (for Real Camera) over LPUART1 and enter receiving mode */
       if (is_dummy)
         {
-          printf("[OBC_MAIN] >>> [STEP 3: SEND 'CAM' DUMMY COMMAND TO ADCS] LPUART1 (PC0 RX / PC1 TX) on %s <<<\n", CAM_UART_DEV);
           const char cam_cmd[3] = { 'C', 'A', 'M' };
           write(fd, cam_cmd, 3);
-          printf("[OBC_MAIN] [CAMERA LPUART1] Sent 'CAM' dummy command to ADCS -> Entering RECEIVING MODE:\n"
-                 "            - Dummy Image 1 wait: 30s (%d ms) -> %s\n"
-                 "            - Dummy Image 2 wait: 30s (%d ms) after Image 1 -> %s\n"
-                 "            - Simultaneous burst transfer -> RingBuffer & Flash CAM partition\n",
-                 CAM_SOI_WAIT_MS, CAM_FLASH_STORAGE_PATH,
-                 CAM_SOI_WAIT_MS, CAM_FLASH_STORAGE_PATH2);
+          printf("[OBC] Triggered 'CAM' (Dummy) -> waiting for images...\n");
         }
       else
         {
-          printf("[OBC_MAIN] >>> [STEP 3: SEND 0xCA REAL CAM COMMAND TO ADCS] LPUART1 (PC0 RX / PC1 TX) on %s <<<\n", CAM_UART_DEV);
           const uint8_t trigger_byte = 0xCA;
           write(fd, &trigger_byte, 1);
-          printf("[OBC_MAIN] [CAMERA LPUART1] Sent 0xCA command byte -> Entering RECEIVING MODE:\n"
-                 "            - Image 1 wait: 30s (%d ms) -> %s\n"
-                 "            - Image 2 wait: 30s (%d ms) after Image 1 -> %s\n"
-                 "            - Simultaneous burst transfer -> RingBuffer & Flash CAM partition\n",
-                 CAM_SOI_WAIT_MS, CAM_FLASH_STORAGE_PATH,
-                 CAM_SOI_WAIT_MS, CAM_FLASH_STORAGE_PATH2);
+          printf("[OBC] Triggered 0xCA (Real Camera) -> waiting for images...\n");
         }
-      printf("[OBC_MAIN] ============================================================\n");
 
       size_t photo1_len = 0;
       size_t photo2_len = 0;
@@ -1975,9 +2070,9 @@ static size_t camera_capture_via_lpuart1(bool is_dummy)
         }
       cam_rb_close_all_files();
 
-      /* Mission finished: Disable Camera Power Rails */
-      printf("[OBC_MAIN] >>> [CAMERA POWER OFF] Disabling PA0 (5V), PA12 (3.3V), PC13 (Mission1), PC6 (Mission2) <<<\n");
-      board_camera_power(false);
+      /* Mission finished: Disable PC13 (MSN), PA12 (3.3V), and PA0 (5V) to save power */
+      printf("[OBC] Power OFF: PC13(MSN), PA12(3V3), PA0(5V)\n");
+      obc_msn_power(false);
       usleep(50000); /* 50 ms stabilization */
       g_camera_capture_active = false;
 
@@ -1986,22 +2081,27 @@ static size_t camera_capture_via_lpuart1(bool is_dummy)
       long flash_sz1 = (stat(CAM_FLASH_STORAGE_PATH, &st1) == 0) ? (long)st1.st_size : 0;
       long flash_sz2 = (stat(CAM_FLASH_STORAGE_PATH2, &st2) == 0) ? (long)st2.st_size : 0;
 
-      if (photo1_len >= 4 || flash_sz1 >= 4)
+      if ((photo1_len >= 4 || flash_sz1 >= 4) && (photo2_len >= 4 || flash_sz2 >= 4))
         {
-          printf("[OBC_MAIN] [CAMERA LPUART1] Capture Complete: Photo 1 = %u B (%ld B in %s), Photo 2 = %u B (%ld B in %s)\n",
-                 (unsigned)photo1_len, flash_sz1, CAM_FLASH_STORAGE_PATH,
-                 (unsigned)photo2_len, flash_sz2, CAM_FLASH_STORAGE_PATH2);
+          printf("[OBC] Received 2 images successfully (img1=%ld B, img2=%ld B) -> stored to flash\n",
+                 flash_sz1 > 0 ? flash_sz1 : (long)photo1_len,
+                 flash_sz2 > 0 ? flash_sz2 : (long)photo2_len);
           return photo1_len + photo2_len;
+        }
+      else if (photo1_len >= 4 || flash_sz1 >= 4)
+        {
+          printf("[OBC] Received 1 image successfully (img1=%ld B) -> stored to flash\n",
+                 flash_sz1 > 0 ? flash_sz1 : (long)photo1_len);
+          return photo1_len;
         }
       else if (photo2_len >= 4 || flash_sz2 >= 4)
         {
-          printf("[OBC_MAIN] [CAMERA LPUART1] Capture Complete: Photo 2 = %u B (%ld B in %s)\n",
-                 (unsigned)photo2_len, flash_sz2, CAM_FLASH_STORAGE_PATH2);
+          printf("[OBC] Received 1 image successfully (img2=%ld B) -> stored to flash\n",
+                 flash_sz2 > 0 ? flash_sz2 : (long)photo2_len);
           return photo2_len;
         }
 
-      printf("[OBC_MAIN] [CAMERA LPUART1] >>> NO CAMERA DATA ARRIVED WITHIN 30s TIMEOUT! <<<\n");
-      printf("[OBC_MAIN] >>> Flash CAM partition left empty. Returning 0 bytes captured <<<\n\n");
+      printf("[OBC] No image received (timeout)\n");
       unlink(CAM_FLASH_STORAGE_PATH);
       unlink(CAM_FLASH_STORAGE_PATH2);
       return 0;
@@ -2015,23 +2115,598 @@ static size_t camera_capture_via_lpuart1(bool is_dummy)
 }
 
 /****************************************************************************
+ * External MT25QL01G (128 MB) Partition Table
+ ****************************************************************************/
+
+#define FLASH_PART_HK1_ADDR        0x00000000U
+#define FLASH_PART_HK1_SIZE        (32U * 1024U * 1024U)
+#define FLASH_PART_HK2_ADDR        0x02000000U
+#define FLASH_PART_HK2_SIZE        (32U * 1024U * 1024U)
+#define FLASH_PART_ADCS_ADDR       0x04000000U
+#define FLASH_PART_ADCS_SIZE       (8U * 1024U * 1024U)
+#define FLASH_PART_CAM_RGB_ADDR    0x04800000U
+#define FLASH_PART_CAM_RGB_SIZE    (16U * 1024U * 1024U)
+#define FLASH_PART_CAM_NIR_ADDR    0x05800000U
+#define FLASH_PART_CAM_NIR_SIZE    (16U * 1024U * 1024U)
+#define FLASH_PART_EPDM_ADDR       0x06800000U
+#define FLASH_PART_EPDM_SIZE       (8U * 1024U * 1024U)
+#define FLASH_PART_DPM_ADDR        0x07000000U
+#define FLASH_PART_DPM_SIZE        (8U * 1024U * 1024U)
+#define FLASH_PART_RSV_ADDR        0x07800000U
+#define FLASH_PART_RSV_SIZE        (2U * 1024U * 1024U)
+#define FLASH_PART_FLAGS_ADDR      0x07A00000U
+#define FLASH_PART_FLAGS_SIZE      (2U * 1024U * 1024U)
+#define FLASH_PART_FSIZE_ADDR      0x07C00000U
+#define FLASH_PART_FSIZE_SIZE      (2U * 1024U * 1024U)
+#define FLASH_PART_SEEK_ADDR       0x07E00000U
+#define FLASH_PART_SEEK_SIZE       (2U * 1024U * 1024U)
+
+struct flash_part_desc_s
+{
+  const char *name;
+  const char *dev_path;
+  const char *mnt_path;
+  const char *file_path;
+  uint32_t    base_addr;
+  uint32_t    size_bytes;
+};
+
+static const struct flash_part_desc_s g_flash_parts[] =
+{
+  { "HK_1",        "/dev/hk1",       "/mnt/hk1",       "/mnt/hk1/telemetry.bin",  FLASH_PART_HK1_ADDR,     FLASH_PART_HK1_SIZE     },
+  { "HK_2",        "/dev/hk2",       "/mnt/hk2",       "/mnt/hk2/imu.bin",        FLASH_PART_HK2_ADDR,     FLASH_PART_HK2_SIZE     },
+  { "ADCS_MSN",    "/dev/adcs",      "/mnt/adcs",      "/mnt/adcs/adcs.bin",      FLASH_PART_ADCS_ADDR,    FLASH_PART_ADCS_SIZE    },
+  { "CAM_RGB_MSN", "/dev/cam_rgb",   "/mnt/cam_rgb",   "/mnt/cam_rgb/capture_01.raw", FLASH_PART_CAM_RGB_ADDR, FLASH_PART_CAM_RGB_SIZE },
+  { "CAM_NIR_MSN", "/dev/cam_nir",   "/mnt/cam_nir",   "/mnt/cam_nir/capture_02.raw", FLASH_PART_CAM_NIR_ADDR, FLASH_PART_CAM_NIR_SIZE },
+  { "EPDM_MSN",    "/dev/epdm",      "/mnt/epdm",      "/mnt/epdm/epdm.bin",      FLASH_PART_EPDM_ADDR,    FLASH_PART_EPDM_SIZE    },
+  { "DP_M_MSN",    "/dev/dpm",       "/mnt/dpm",       "/mnt/dpm/dpm.bin",        FLASH_PART_DPM_ADDR,     FLASH_PART_DPM_SIZE     },
+  { "RSV_Table",   "/dev/rsv_table", "/mnt/rsv_table", "/mnt/rsv_table/rsv.bin",  FLASH_PART_RSV_ADDR,     FLASH_PART_RSV_SIZE     },
+  { "Imp_Flags",   "/dev/imp_flags", "/mnt/imp_flags", "/mnt/imp_flags/flags.bin",FLASH_PART_FLAGS_ADDR,   FLASH_PART_FLAGS_SIZE   },
+  { "Part_Size",   "/dev/part_size", "/mnt/part_size", "/mnt/part_size/size.bin", FLASH_PART_FSIZE_ADDR,   FLASH_PART_FSIZE_SIZE   },
+  { "Seek_Ptr",    "/dev/seek_ptr",  "/mnt/seek_ptr",  "/mnt/seek_ptr/seek.bin",  FLASH_PART_SEEK_ADDR,    FLASH_PART_SEEK_SIZE    },
+};
+
+static int ensure_named_partition_mounted(const char *dev, const char *mnt)
+{
+  struct stat st;
+  mkdir("/mnt", 0777);
+  if (stat(mnt, &st) != 0)
+    {
+      mkdir(mnt, 0777);
+    }
+
+  int ret = mount(dev, mnt, "littlefs", 0, "autoformat");
+  if (ret < 0 && errno == ENOMEM)
+    {
+      /* Free idle camera LittleFS mounts (~3-4 KB heap) and retry */
+      unmount_camera_partitions();
+      ret = mount(dev, mnt, "littlefs", 0, "autoformat");
+    }
+
+  if (ret < 0)
+    {
+      int err = errno;
+      if (err == EBUSY || err == EEXIST || err == ENOTDIR)
+        {
+          return 0;
+        }
+      if (err == ENOMEM)
+        {
+          printf("[OBC_MAIN] ERROR: mount(%s -> %s) out of memory (ENOMEM)\n", dev, mnt);
+          return -ENOMEM;
+        }
+      ret = mount(dev, mnt, "littlefs", 0, "forceformat");
+      if (ret == 0 || errno == EBUSY || errno == EEXIST || errno == ENOTDIR)
+        {
+          return 0;
+        }
+      return -errno;
+    }
+  return 0;
+}
+
+static size_t epdm_capture_via_lpuart1(void)
+{
+  printf("\n[OBC] EPDM Power ON: PA12(3V3) + PC13(MSN) ONLY (PA0 5V OFF)\n");
+  obc_msn_power_3v3_only(true);
+
+  int fd = open(CAM_UART_DEV, O_RDWR | O_NOCTTY);
+  if (fd < 0)
+    {
+      printf("[OBC] EPDM Error: UART %s open failed (errno=%d)\n", CAM_UART_DEV, errno);
+      obc_msn_power_3v3_only(false);
+      return 0;
+    }
+
+  struct termios tio;
+  if (tcgetattr(fd, &tio) == 0)
+    {
+      cfmakeraw(&tio);
+      cfsetspeed(&tio, B115200);
+      tio.c_cflag |= (CLOCAL | CREAD);
+      tio.c_cflag &= ~PARENB;
+      tio.c_cflag &= ~CSTOPB;
+      tio.c_cflag &= ~CSIZE;
+      tio.c_cflag |= CS8;
+      tcsetattr(fd, TCSANOW, &tio);
+    }
+
+  lpuart1_pc0_pc1_hw_setup();
+  usleep(200000);
+  lpuart1_pc0_pc1_hw_setup();
+  tcflush(fd, TCIOFLUSH);
+
+  /* Handshake "MSN" with MSN BUS */
+  bool hs_ok = false;
+  for (int attempt = 0; attempt < 10 && !hs_ok; attempt++)
+    {
+      if (WL55_LPUART1_ISR & 0x0FUL) WL55_LPUART1_ICR = 0x0FUL;
+      tcflush(fd, TCIOFLUSH);
+      write(fd, "MSN", 3);
+
+      struct timespec hs_t0;
+      clock_gettime(CLOCK_MONOTONIC, &hs_t0);
+      int midx = 0;
+      while (cam_elapsed_ms(&hs_t0) < 500)
+        {
+          if (WL55_LPUART1_ISR & 0x0FUL) WL55_LPUART1_ICR = 0x0FUL;
+          struct pollfd pfd = { .fd = fd, .events = POLLIN };
+          if (poll(&pfd, 1, 50) > 0 && (pfd.revents & POLLIN))
+            {
+              uint8_t ch = 0;
+              if (read(fd, &ch, 1) == 1)
+                {
+                  if ((midx == 0 && ch == 'M') || (midx == 1 && ch == 'S')) midx++;
+                  else if (midx == 2 && ch == 'N') { hs_ok = true; break; }
+                  else midx = (ch == 'M') ? 1 : 0;
+                }
+            }
+        }
+    }
+
+  if (!hs_ok)
+    {
+      printf("[OBC] EPDM Handshake 'MSN' FAILED\n");
+      close(fd);
+      obc_msn_power_3v3_only(false);
+      return 0;
+    }
+
+  printf("[OBC] EPDM Handshake 'MSN' OK -> Sending 'EPDM' command to MSN BUS\n");
+  usleep(50000);
+  tcflush(fd, TCIOFLUSH);
+  write(fd, "EPDM", 4);
+
+  /* Signal unified storage consumer to start a fresh /mnt/epdm/epdm.bin */
+  storage_rb_push(STORAGE_PART_EPDM, STORAGE_FLAG_TRUNC, NULL, 0);
+
+  size_t total_rx = 0;
+  size_t total_queued = 0;
+  size_t next_log_at = 2048;
+  bool logged_first_chunk = false;
+  struct timespec t_start, t_last;
+  clock_gettime(CLOCK_MONOTONIC, &t_start);
+  t_last = t_start;
+  uint8_t rx_buf[STORAGE_CHUNK_SIZE];
+
+  printf("[OBC] EPDM Capture started -> waiting for data from MSN BUS...\n");
+
+  while (cam_elapsed_ms(&t_start) < 65000)
+    {
+      if (WL55_LPUART1_ISR & 0x0FUL) WL55_LPUART1_ICR = 0x0FUL;
+      struct pollfd pfd = { .fd = fd, .events = POLLIN };
+      if (poll(&pfd, 1, 200) > 0 && (pfd.revents & POLLIN))
+        {
+          ssize_t n = read(fd, rx_buf, sizeof(rx_buf));
+          if (n > 0)
+            {
+              if (!logged_first_chunk)
+                {
+                  logged_first_chunk = true;
+                  ssize_t show = (n < 16) ? n : 16;
+                  printf("[OBC] EPDM Captured data started (first %zd B):", show);
+                  for (ssize_t bi = 0; bi < show; bi++)
+                    {
+                      printf(" %02X", rx_buf[bi]);
+                    }
+                  printf("\n");
+                }
+
+              if (storage_rb_push(STORAGE_PART_EPDM, STORAGE_FLAG_APPEND,
+                                  rx_buf, (uint16_t)n) == 0)
+                {
+                  total_queued += (size_t)n;
+                }
+              total_rx += (size_t)n;
+              if (total_rx >= next_log_at)
+                {
+                  printf("[OBC] EPDM Capturing data... %u B received\n",
+                         (unsigned)total_rx);
+                  next_log_at += 2048;
+                }
+              clock_gettime(CLOCK_MONOTONIC, &t_last);
+            }
+        }
+      if (total_rx > 0 && cam_elapsed_ms(&t_last) >= 4000)
+        {
+          break;
+        }
+    }
+
+  /* Append single 0xFF 0xD9 footer at end of 1-min EPDM stream and finalize */
+  if (total_rx > 0)
+    {
+      static const uint8_t epdm_footer[2] = { 0xFFU, 0xD9U };
+      if (storage_rb_push(STORAGE_PART_EPDM, STORAGE_FLAG_APPEND | STORAGE_FLAG_FINAL,
+                          epdm_footer, sizeof(epdm_footer)) == 0)
+        {
+          total_queued += sizeof(epdm_footer);
+        }
+    }
+  else
+    {
+      storage_rb_push(STORAGE_PART_EPDM, STORAGE_FLAG_FINAL, NULL, 0);
+    }
+  storage_rb_flush();
+
+  close(fd);
+  printf("[OBC] EPDM Captured %u B total -> queued %u B to external flash (/mnt/epdm/epdm.bin). Power OFF.\n",
+         (unsigned)total_rx, (unsigned)total_queued);
+  obc_msn_power_3v3_only(false);
+  return total_queued;
+}
+
+static size_t adcs_capture_via_lpuart1(void)
+{
+  printf("\n[OBC] ADCS Power ON: PA0(5V) + PA12(3V3) + PC13(MSN)\n");
+  obc_msn_power(true);
+
+  int fd = open(CAM_UART_DEV, O_RDWR | O_NOCTTY);
+  if (fd < 0)
+    {
+      printf("[OBC] ADCS Error: UART %s open failed (errno=%d)\n", CAM_UART_DEV, errno);
+      obc_msn_power(false);
+      return 0;
+    }
+
+  struct termios tio;
+  if (tcgetattr(fd, &tio) == 0)
+    {
+      cfmakeraw(&tio);
+      cfsetspeed(&tio, B115200);
+      tio.c_cflag |= (CLOCAL | CREAD);
+      tio.c_cflag &= ~PARENB;
+      tio.c_cflag &= ~CSTOPB;
+      tio.c_cflag &= ~CSIZE;
+      tio.c_cflag |= CS8;
+      tcsetattr(fd, TCSANOW, &tio);
+    }
+
+  lpuart1_pc0_pc1_hw_setup();
+  usleep(200000);
+  lpuart1_pc0_pc1_hw_setup();
+  tcflush(fd, TCIOFLUSH);
+
+  /* Handshake "MSN" with MSN BUS */
+  bool hs_ok = false;
+  for (int attempt = 0; attempt < 10 && !hs_ok; attempt++)
+    {
+      if (WL55_LPUART1_ISR & 0x0FUL) WL55_LPUART1_ICR = 0x0FUL;
+      tcflush(fd, TCIOFLUSH);
+      write(fd, "MSN", 3);
+
+      struct timespec hs_t0;
+      clock_gettime(CLOCK_MONOTONIC, &hs_t0);
+      int midx = 0;
+      while (cam_elapsed_ms(&hs_t0) < 500)
+        {
+          if (WL55_LPUART1_ISR & 0x0FUL) WL55_LPUART1_ICR = 0x0FUL;
+          struct pollfd pfd = { .fd = fd, .events = POLLIN };
+          if (poll(&pfd, 1, 50) > 0 && (pfd.revents & POLLIN))
+            {
+              uint8_t ch = 0;
+              if (read(fd, &ch, 1) == 1)
+                {
+                  if ((midx == 0 && ch == 'M') || (midx == 1 && ch == 'S')) midx++;
+                  else if (midx == 2 && ch == 'N') { hs_ok = true; break; }
+                  else midx = (ch == 'M') ? 1 : 0;
+                }
+            }
+        }
+    }
+
+  if (!hs_ok)
+    {
+      printf("[OBC] ADCS Handshake 'MSN' FAILED\n");
+      close(fd);
+      obc_msn_power(false);
+      return 0;
+    }
+
+  printf("[OBC] ADCS Handshake 'MSN' OK -> Sending 'ADCS' command to MSN BUS\n");
+  usleep(50000);
+  tcflush(fd, TCIOFLUSH);
+  write(fd, "ADCS", 4);
+
+  storage_rb_push(STORAGE_PART_ADCS, STORAGE_FLAG_TRUNC, NULL, 0);
+
+  size_t total_rx = 0;
+  size_t total_queued = 0;
+  bool logged_first = false;
+  struct timespec t_start, t_last;
+  clock_gettime(CLOCK_MONOTONIC, &t_start);
+  t_last = t_start;
+  uint8_t rx_buf[STORAGE_CHUNK_SIZE];
+
+  printf("[OBC] ADCS Capture started (1 min @ 1 Hz) -> waiting for data from MSN BUS...\n");
+
+  while (cam_elapsed_ms(&t_start) < 66000)
+    {
+      if (WL55_LPUART1_ISR & 0x0FUL) WL55_LPUART1_ICR = 0x0FUL;
+      struct pollfd pfd = { .fd = fd, .events = POLLIN };
+      if (poll(&pfd, 1, 200) > 0 && (pfd.revents & POLLIN))
+        {
+          ssize_t n = read(fd, rx_buf, sizeof(rx_buf));
+          if (n > 0)
+            {
+              if (!logged_first)
+                {
+                  logged_first = true;
+                  ssize_t show = (n < 16) ? n : 16;
+                  printf("[OBC] ADCS Captured data started (first %zd B):", show);
+                  for (ssize_t bi = 0; bi < show; bi++) printf(" %02X", rx_buf[bi]);
+                  printf("\n");
+                }
+
+              if (storage_rb_push(STORAGE_PART_ADCS, STORAGE_FLAG_APPEND,
+                                  rx_buf, (uint16_t)n) == 0)
+                {
+                  total_queued += (size_t)n;
+                }
+              total_rx += (size_t)n;
+              printf("[OBC] ADCS Received +%zd B (total=%u B -> queued to flash)\n",
+                     n, (unsigned)total_rx);
+              clock_gettime(CLOCK_MONOTONIC, &t_last);
+            }
+        }
+      if (total_rx > 0 && cam_elapsed_ms(&t_last) >= 4000)
+        {
+          break;
+        }
+    }
+
+  storage_rb_push(STORAGE_PART_ADCS, STORAGE_FLAG_FINAL, NULL, 0);
+  storage_rb_flush();
+
+  close(fd);
+  printf("[OBC] ADCS Captured %u B total -> queued %u B to external flash (/mnt/adcs/adcs.bin). Power OFF.\n",
+         (unsigned)total_rx, (unsigned)total_queued);
+  obc_msn_power(false);
+  return total_queued;
+}
+
+static const struct flash_part_desc_s *flash_part_find_by_addr(uint32_t addr, uint32_t *rel_offset)
+{
+  for (size_t i = 0; i < sizeof(g_flash_parts) / sizeof(g_flash_parts[0]); i++)
+    {
+      uint32_t base = g_flash_parts[i].base_addr;
+      uint32_t sz   = g_flash_parts[i].size_bytes;
+      if (addr >= base && (addr - base) < sz)
+        {
+          if (rel_offset != NULL)
+            {
+              *rel_offset = addr - base;
+            }
+          return &g_flash_parts[i];
+        }
+    }
+  return NULL;
+}
+
+static bool stream_raw_partition_from_flash(const struct flash_part_desc_s *part,
+                                            uint32_t rel_offset,
+                                            uint16_t num_pkts)
+{
+  if (part == NULL)
+    {
+      return false;
+    }
+
+  if (num_pkts == 0)
+    {
+      num_pkts = 1;
+    }
+
+  if (rel_offset >= part->size_bytes)
+    {
+      return false;
+    }
+
+  /* Flush unified storage queue and unmount any active partition first */
+  storage_rb_flush();
+
+  if (ensure_named_partition_mounted(part->dev_path, part->mnt_path) < 0)
+    {
+      printf("[OBC_MAIN] [FLASH PART %s] Failed to mount %s (errno=%d)\n",
+             part->name, part->dev_path, errno);
+      return false;
+    }
+
+  int fd = open(part->file_path, O_RDONLY);
+  if (fd < 0)
+    {
+      printf("[OBC_MAIN] [FLASH PART %s] No data file %s (errno=%d)\n",
+             part->name, part->file_path, errno);
+      umount(part->mnt_path);
+      return false;
+    }
+
+  off_t fsz = lseek(fd, 0, SEEK_END);
+  if (fsz <= (off_t)rel_offset)
+    {
+      printf("[OBC_MAIN] [FLASH PART %s] Empty or offset out of range (size=%ld, off=%lu)\n",
+             part->name, (long)fsz, (unsigned long)rel_offset);
+      close(fd);
+      umount(part->mnt_path);
+      return false;
+    }
+
+  uint16_t sent = 0;
+  lseek(fd, (off_t)rel_offset, SEEK_SET);
+
+  for (uint16_t p = 0; p < num_pkts; p++)
+    {
+      struct flash_chunk_s chunk;
+      memset(&chunk, 0, sizeof(chunk));
+      chunk.flash_addr = part->base_addr + rel_offset + (uint32_t)p * FLASH_DATA_LEN;
+      chunk.pkt_idx    = p;
+      chunk.total_pkts = num_pkts;
+      chunk.data_len   = FLASH_DATA_LEN;
+      chunk.status     = 0;
+
+      ssize_t n = read(fd, chunk.data, FLASH_DATA_LEN);
+      if (n <= 0)
+        {
+          break;
+        }
+      if (n < (ssize_t)FLASH_DATA_LEN)
+        {
+          memset(&chunk.data[n], 0x00, FLASH_DATA_LEN - n);
+        }
+
+      int retries = 3000;
+      while (!flash_data_write(&chunk) && retries-- > 0)
+        {
+          usleep(5000);
+        }
+      if (retries <= 0)
+        {
+          break;
+        }
+
+      sent++;
+      ipcc_m4_send(IPCC_CH_FLASH);
+      usleep(10000);
+    }
+
+  close(fd);
+  umount(part->mnt_path);
+  printf("[OBC_MAIN] [FLASH PART %s] Streamed %u/%u packets from 0x%08lX\n",
+         part->name, (unsigned)sent, (unsigned)num_pkts,
+         (unsigned long)(part->base_addr + rel_offset));
+  return (sent > 0);
+}
+
+static void erase_all_flash_partitions(uint8_t mode)
+{
+  printf("[OBC_MAIN] [ERASE ALL] Starting flash erase (mode=0x%02X)...\n", mode);
+  storage_rb_flush();
+  mkdir("/mnt", 0777);
+
+  if (mode == 0xCC || mode == 0xAA)
+    {
+      mkdir("/mnt/hk1", 0777);
+      umount("/mnt/hk1");
+      if (mount("/dev/hk1", "/mnt/hk1", "littlefs", 0, "forceformat") == 0)
+        {
+          umount("/mnt/hk1");
+        }
+      mkdir("/mnt/hk2", 0777);
+      umount("/mnt/hk2");
+      if (mount("/dev/hk2", "/mnt/hk2", "littlefs", 0, "forceformat") == 0)
+        {
+          umount("/mnt/hk2");
+        }
+      printf("[OBC_MAIN] [ERASE ALL] Cleared HK_1 & HK_2 partitions\n");
+    }
+
+  if (mode == 0xDD || mode == 0xAA)
+    {
+      mkdir("/mnt/cam_rgb", 0777);
+      umount("/mnt/cam_rgb");
+      if (mount("/dev/cam_rgb", "/mnt/cam_rgb", "littlefs", 0, "forceformat") == 0)
+        {
+          umount("/mnt/cam_rgb");
+        }
+      mkdir("/mnt/cam_nir", 0777);
+      umount("/mnt/cam_nir");
+      if (mount("/dev/cam_nir", "/mnt/cam_nir", "littlefs", 0, "forceformat") == 0)
+        {
+          umount("/mnt/cam_nir");
+        }
+      printf("[OBC_MAIN] [ERASE ALL] Cleared CAM RGB & CAM NIR partitions\n");
+    }
+
+  if (mode == 0xAA)
+    {
+      for (size_t i = 0; i < sizeof(g_flash_parts) / sizeof(g_flash_parts[0]); i++)
+        {
+          if (g_flash_parts[i].base_addr >= FLASH_PART_ADCS_ADDR &&
+              g_flash_parts[i].base_addr != FLASH_PART_CAM_RGB_ADDR &&
+              g_flash_parts[i].base_addr != FLASH_PART_CAM_NIR_ADDR)
+            {
+              mkdir(g_flash_parts[i].mnt_path, 0777);
+              umount(g_flash_parts[i].mnt_path);
+              if (mount(g_flash_parts[i].dev_path, g_flash_parts[i].mnt_path,
+                        "littlefs", 0, "forceformat") == 0)
+                {
+                  umount(g_flash_parts[i].mnt_path);
+                }
+              printf("[OBC_MAIN] [ERASE ALL] Formatted %s (%s)\n",
+                     g_flash_parts[i].name, g_flash_parts[i].dev_path);
+            }
+        }
+    }
+
+  printf("[OBC_MAIN] [ERASE ALL] Flash erase complete!\n");
+}
+
+/****************************************************************************
  * Name: stream_real_camera_from_flash
  *
  * Description:
- *   Reads the stored JPEG photo (Real or Dummy) from the Flash CAM partition
- *   (/mnt/camera/capture_01.raw or /dev/camera) chunk-by-chunk (128 bytes
- *   per chunk) starting from start_addr, and sends each chunk to Cortex-M0+
- *   via shared SRAM2 ring buffer.
+ *   Reads the stored JPEG photo (Real or Dummy) from the Flash CAM RGB or
+ *   CAM NIR partition chunk-by-chunk (128 bytes per chunk) starting from
+ *   start_addr, and sends each chunk to Cortex-M0+ via shared SRAM2.
  ****************************************************************************/
 
 static bool stream_real_camera_from_flash(uint32_t start_addr, uint16_t num_pkts)
 {
-  ensure_camera_partition_mounted();
+  storage_rb_flush();
+  const char *cam_dev = (start_addr >= FLASH_PART_CAM_NIR_ADDR &&
+                         start_addr < (FLASH_PART_CAM_NIR_ADDR + FLASH_PART_CAM_NIR_SIZE))
+                        ? "/dev/cam_nir" : "/dev/cam_rgb";
+  const char *cam_mnt = (start_addr >= FLASH_PART_CAM_NIR_ADDR &&
+                         start_addr < (FLASH_PART_CAM_NIR_ADDR + FLASH_PART_CAM_NIR_SIZE))
+                        ? "/mnt/cam_nir" : "/mnt/cam_rgb";
+  ensure_named_partition_mounted(cam_dev, cam_mnt);
   int cam_fd = -1;
   const char *selected_path = CAM_FLASH_STORAGE_PATH;
+  uint32_t rel_addr = start_addr;
 
-  /* If address offset is >= 0x80000, stream Photo 2 directly */
-  if (start_addr >= 0x80000)
+  /* Partition-based addressing: CAM NIR (0x05800000) or CAM RGB (0x04800000) */
+  if (start_addr >= FLASH_PART_CAM_NIR_ADDR &&
+      start_addr < (FLASH_PART_CAM_NIR_ADDR + FLASH_PART_CAM_NIR_SIZE))
+    {
+      rel_addr = start_addr - FLASH_PART_CAM_NIR_ADDR;
+      cam_fd = open(CAM_FLASH_STORAGE_PATH2, O_RDONLY);
+      if (cam_fd >= 0)
+        {
+          selected_path = CAM_FLASH_STORAGE_PATH2;
+        }
+    }
+  else if (start_addr >= FLASH_PART_CAM_RGB_ADDR &&
+           start_addr < (FLASH_PART_CAM_RGB_ADDR + FLASH_PART_CAM_RGB_SIZE))
+    {
+      rel_addr = start_addr - FLASH_PART_CAM_RGB_ADDR;
+      cam_fd = open(CAM_FLASH_STORAGE_PATH, O_RDONLY);
+      if (cam_fd >= 0)
+        {
+          selected_path = CAM_FLASH_STORAGE_PATH;
+        }
+    }
+  /* Legacy offset >= 0x80000 selects Photo 2 (NIR) directly */
+  else if (start_addr >= 0x80000 && start_addr < FLASH_PART_HK2_ADDR)
     {
       cam_fd = open(CAM_FLASH_STORAGE_PATH2, O_RDONLY);
       if (cam_fd >= 0)
@@ -2044,11 +2719,13 @@ static bool stream_real_camera_from_flash(uint32_t start_addr, uint16_t num_pkts
             }
           else
             {
-              start_addr -= 0x80000;
+              rel_addr = start_addr - 0x80000;
               selected_path = CAM_FLASH_STORAGE_PATH2;
             }
         }
     }
+
+  start_addr = rel_addr;
 
   /* Otherwise open Photo 1 (/mnt/camera/capture_01.raw) */
   if (cam_fd < 0)
@@ -2118,6 +2795,7 @@ static bool stream_real_camera_from_flash(uint32_t start_addr, uint16_t num_pkts
         {
           close(cam_fd);
         }
+      umount(cam_mnt);
       return false;
     }
 
@@ -2187,6 +2865,7 @@ static bool stream_real_camera_from_flash(uint32_t start_addr, uint16_t num_pkts
     {
       close(cam_fd);
     }
+  umount(cam_mnt);
 
   printf("[OBC_MAIN] >>> [CAMERA FLASH IPC] ALL %u CHUNKS STREAMED TO M0+ <<<\n\n",
          (unsigned)num_chunks);
@@ -2207,10 +2886,24 @@ static bool stream_hk_from_flash(uint32_t start_addr, uint16_t num_pkts)
 {
   if (num_pkts == 0) num_pkts = 1;
 
-  ensure_hk_partition_mounted();
-  hk_rb_drain_to_flash();
+  storage_rb_flush();
 
-  int fd = open("/mnt/hk/telemetry.bin", O_RDONLY);
+  const char *hk_dev  = "/dev/hk1";
+  const char *hk_mnt  = "/mnt/hk1";
+  const char *hk_file = "/mnt/hk1/telemetry.bin";
+  uint32_t rel_addr = start_addr;
+  if (start_addr >= FLASH_PART_HK2_ADDR &&
+      start_addr < (FLASH_PART_HK2_ADDR + FLASH_PART_HK2_SIZE))
+    {
+      hk_dev  = "/dev/hk2";
+      hk_mnt  = "/mnt/hk2";
+      hk_file = "/mnt/hk2/imu.bin";
+      rel_addr = start_addr - FLASH_PART_HK2_ADDR;
+    }
+
+  ensure_named_partition_mounted(hk_dev, hk_mnt);
+
+  int fd = open(hk_file, O_RDONLY);
   off_t file_size = 0;
   if (fd >= 0)
     {
@@ -2221,19 +2914,20 @@ static bool stream_hk_from_flash(uint32_t start_addr, uint16_t num_pkts)
     {
       printf("\n[OBC_MAIN] ============================================================\n");
       printf("[OBC_MAIN] >>> [HK FLASH IPC] REJECTED: HK FLASH DATA IS NULL / EMPTY! <<<\n");
-      printf("[OBC_MAIN]     fd=%d, size=%ld B, start_addr=0x%08lX\n",
-             fd, (long)file_size, (unsigned long)start_addr);
+      printf("[OBC_MAIN]     file=%s, fd=%d, size=%ld B, start_addr=0x%08lX\n",
+             hk_file, fd, (long)file_size, (unsigned long)start_addr);
       printf("[OBC_MAIN]     No HK data in Flash -> Rejecting & leaving ring buffer empty for M0+ NACK\n");
       printf("[OBC_MAIN] ============================================================\n\n");
       if (fd >= 0)
         {
           close(fd);
         }
+      umount(hk_mnt);
       return false;
     }
 
   uint32_t avail_records = (uint32_t)(file_size / FLASH_DATA_LEN);
-  uint32_t start_rec     = start_addr / FLASH_DATA_LEN;
+  uint32_t start_rec     = rel_addr / FLASH_DATA_LEN;
 
   printf("\n[OBC_MAIN] ============================================================\n");
   printf("[OBC_MAIN] >>> [HK FLASH IPC] STREAMING HK TELEMETRY FROM FLASH (/mnt/hk/telemetry.bin) <<<\n");
@@ -2309,6 +3003,7 @@ static bool stream_hk_from_flash(uint32_t start_addr, uint16_t num_pkts)
     {
       close(fd);
     }
+  umount(hk_mnt);
 
   if (chunks_sent == 0)
     {
@@ -2385,6 +3080,13 @@ static void process_ground_commands(void)
             return;
           }
 
+        uint32_t cmd_addr = ((uint32_t)rx_cmd.cmd[7]  << 24) |
+                            ((uint32_t)rx_cmd.cmd[8]  << 16) |
+                            ((uint32_t)rx_cmd.cmd[9]  <<  8) |
+                             (uint32_t)rx_cmd.cmd[10];
+        uint16_t cmd_pkts = ((uint16_t)rx_cmd.cmd[11] <<  8) |
+                             (uint16_t)rx_cmd.cmd[12];
+
         /********************************************************************
          * Dummy Camera Capture Command: 53 04 CC 5E BE ... (or data_id == 0x00D0)
          * or 8-byte format: 53 00 C5 E0 ...
@@ -2397,104 +3099,82 @@ static void process_ground_commands(void)
                              (rx_cmd.cmd[2] == 0xC5 && rx_cmd.cmd[3] == 0xE0));
 
         /********************************************************************
-         * Camera Data Downlink Command (Real & Dummy stored in Flash CAM):
-         *   53 04 CC 5E BD 00 00 00 00 00 00 00 00
-         * Or legacy OBC download:
-         *   53 01 1D D2 F5 [DATA_ID:2B] [ADDR:4B] [PKTS:2B]
+         * Camera Data Downlink Commands:
+         *   RGB: 53 04 CC 5E BD ... or 53 01 1D D2 F5 [RSV:2B] [ADDR:4B] [PKTS:2B]
+         *   NIR: 53 01 1D D2 F6 [RSV:2B] [ADDR:4B] [PKTS:2B]
          ********************************************************************/
 
-        bool is_cam_down = ((rx_cmd.cmd[1] == CMD_TYPE_CAMERA &&
-                             rx_cmd.cmd[2] == 0xCC &&
-                             (rx_cmd.cmd[3] == 0x5E || rx_cmd.cmd[3] == 0x58) &&
-                             rx_cmd.cmd[4] == 0xBD) ||
-                            (rx_cmd.cmd[1] == 0x01 && rx_cmd.cmd[2] == 0x1D &&
-                             rx_cmd.cmd[3] == 0xD2 && rx_cmd.cmd[4] == 0xF5));
+        bool is_cam_nir_down = (rx_cmd.cmd[1] == CMD_TYPE_HK &&
+                                rx_cmd.cmd[2] == 0x1D &&
+                                rx_cmd.cmd[3] == 0xD2 &&
+                                rx_cmd.cmd[4] == 0xF6);
+
+        bool is_cam_down = ((rx_cmd.cmd[1] == CMD_TYPE_HK && rx_cmd.cmd[2] == 0x1D &&
+                             rx_cmd.cmd[3] == 0xD2 && rx_cmd.cmd[4] == 0xF5) ||
+                            is_cam_nir_down);
 
         /********************************************************************
-         * Real Camera Capture Command (store to flash, NO downlink):
-         *   53 04 CC 5E BC ... or 53 04 CC 5E CA ... or 53 04 CA ...
+         * Real Camera / ADCS Run Command (store to flash, NO downlink):
+         *   53 04 CC 5E BD ... (or BC / CA)
          ********************************************************************/
 
         bool is_real_cam_cap = (rx_cmd.cmd[1] == CMD_TYPE_CAMERA &&
-                                ((rx_cmd.cmd[2] == 0xCC && (rx_cmd.cmd[4] == 0xBC || rx_cmd.cmd[4] == 0xCA)) ||
+                                ((rx_cmd.cmd[2] == 0xCC &&
+                                  (rx_cmd.cmd[4] == 0xBD || rx_cmd.cmd[4] == 0xBC || rx_cmd.cmd[4] == 0xCA)) ||
                                  rx_cmd.cmd[2] == 0xCA));
 
         if (is_dummy_cam)
           {
-            printf("[OBC_MAIN] Detected Verified DUMMY CAMERA CAPTURE Command -> Handshake 'MSN', send 'CAM' to ADCS, receive Dummy JPEG (FFD8..FFD9) and store in Flash CAM partition (NO downlink)\n");
+            printf("[OBC] Command: DUMMY CAMERA CAPTURE\n");
             size_t cap_len = camera_capture_via_lpuart1(true);
-            if (cap_len > 0)
-              {
-                printf("[OBC_MAIN] Dummy camera capture from ADCS and flash storage complete (%u bytes) -> Signaling M0+ SUCCESS\n",
-                       (unsigned)cap_len);
-                SHARED_FLASH_REQ->seq = 1;
-              }
-            else
-              {
-                printf("[OBC_MAIN] Dummy camera capture from ADCS FAILED -> Signaling M0+ NACK\n");
-                SHARED_FLASH_REQ->seq = 0;
-              }
+            SHARED_FLASH_REQ->seq = (cap_len > 0) ? 1 : 0;
+            printf("[OBC] Submitted capture status to M0+: %s (%u B)\n",
+                   (cap_len > 0) ? "OK" : "FAIL", (unsigned)cap_len);
             ipcc_m4_send(IPCC_CH_COMMAND); /* Signal M0+ that capture task is complete */
           }
         else if (is_cam_down)
           {
-            uint32_t cam_addr = ((uint32_t)rx_cmd.cmd[7]  << 24) |
-                                ((uint32_t)rx_cmd.cmd[8]  << 16) |
-                                ((uint32_t)rx_cmd.cmd[9]  <<  8) |
-                                 (uint32_t)rx_cmd.cmd[10];
-            uint16_t cam_pkts = ((uint16_t)rx_cmd.cmd[11] <<  8) | rx_cmd.cmd[12];
-            printf("[OBC_MAIN] Detected Verified CAMERA DATA DOWNLOAD Command (53 04 CC 5E BD...): addr=0x%08lX pkts=%u -> Checking Flash CAM partition...\n",
-                   (unsigned long)cam_addr, cam_pkts);
-            bool has_data = stream_real_camera_from_flash(cam_addr, cam_pkts);
-            if (has_data)
+            uint32_t cam_addr = cmd_addr;
+            if (is_cam_nir_down && cam_addr < FLASH_PART_CAM_NIR_ADDR)
               {
-                printf("[OBC_MAIN] Camera photo (Real/Dummy) streamed from Flash CAM partition to ring buffer -> Notifying M0+\n");
+                cam_addr += FLASH_PART_CAM_NIR_ADDR;
               }
-            else
-              {
-                printf("[OBC_MAIN] Camera photo data null/empty in Flash CAM partition -> Rejecting & leaving ring buffer empty for M0+ NACK\n");
-              }
+            printf("[OBC] Command: CAMERA %s DOWNLINK (addr=0x%08lX pkts=%u)\n",
+                   is_cam_nir_down ? "NIR" : "RGB",
+                   (unsigned long)cam_addr, cmd_pkts);
+            bool has_data = stream_real_camera_from_flash(cam_addr, cmd_pkts);
+            printf("[OBC] Submitted camera downlink to M0+: %s\n",
+                   has_data ? "OK" : "EMPTY");
             ipcc_m4_send(IPCC_CH_COMMAND); /* Notify M0+ command processing complete */
           }
         else if (is_real_cam_cap)
           {
-            printf("[OBC_MAIN] Detected Verified REAL CAMERA CAPTURE Command -> Handshake 'MSN', 0xCA trigger, wait 30s receiving mode for 2 Photos (FFD8..FFD9) to Flash CAM partition (NO downlink)\n");
+            printf("[OBC] Command: REAL CAMERA CAPTURE\n");
             size_t cap_len = camera_capture_via_lpuart1(false);
-            if (cap_len > 0)
-              {
-                printf("[OBC_MAIN] Camera capture and flash storage complete (%u bytes) -> Signaling M0+ SUCCESS\n",
-                       (unsigned)cap_len);
-                SHARED_FLASH_REQ->seq = 1;
-              }
-            else
-              {
-                printf("[OBC_MAIN] Camera capture FAILED (handshake failed or no data arrived in 30s) -> Signaling M0+ NACK\n");
-                SHARED_FLASH_REQ->seq = 0;
-              }
+            SHARED_FLASH_REQ->seq = (cap_len > 0) ? 1 : 0;
+            printf("[OBC] Submitted capture status to M0+: %s (%u B)\n",
+                   (cap_len > 0) ? "OK" : "FAIL", (unsigned)cap_len);
             ipcc_m4_send(IPCC_CH_COMMAND); /* Signal M0+ that capture task is complete */
           }
 
         /********************************************************************
-         * Housekeeping / Flash Download commands (from Packet Format.xlsx):
-         *   HK Download   = 53 01 1D D1 F2 [DID:2B] [ADDR:4B] [PKTS:2B] (sat_health.txt)
-         *   Flash Read    = 53 01 1D D1 F8 [DID:2B] [ADDR:4B] [PKTS:2B] (Flash Storage)
-         *   Ping / Beacon = 53 01 1D D1 F5 / D2 F5 ...
+         * Housekeeping / Partition / Flash Download commands:
+         *   HK_1 / HK_2   = 53 01 1D D1 F2 / F3 [RSV:2B] [ADDR:4B] [PKTS:2B]
+         *   RSV Table     = 53 01 1D D1 F4      [RSV:2B] [ADDR:4B] [PKTS:2B]
+         *   Ping / Beacon = 53 01 1D D1 F5      [RSV:2B] [ADDR:4B] [PKTS:2B]
+         *   EPDM Download = 53 01 1D D2 F7      [RSV:2B] [ADDR:4B] [PKTS:2B]
+         *   ADCS Download = 53 01 1D D2 F8      [RSV:2B] [ADDR:4B] [PKTS:2B]
+         *   Flash Read    = 53 01 1D D1 F8      [RSV:2B] [ADDR:4B] [PKTS:2B]
          ********************************************************************/
 
-        else if ((rx_cmd.cmd[1] == CMD_TYPE_HK && rx_cmd.cmd[2] == 0x1D &&
-                  (rx_cmd.cmd[4] == 0xF2 || rx_cmd.cmd[4] == 0xF8)) ||
-                 rx_cmd.cmd[4] == 0xF8)
+        else if (rx_cmd.cmd[1] == CMD_TYPE_HK && rx_cmd.cmd[2] == 0x1D &&
+                 rx_cmd.cmd[3] == 0xD1 &&
+                 (rx_cmd.cmd[4] == 0xF2 || rx_cmd.cmd[4] == 0xF3))
           {
-            uint32_t addr = ((uint32_t)rx_cmd.cmd[7]  << 24) |
-                            ((uint32_t)rx_cmd.cmd[8]  << 16) |
-                            ((uint32_t)rx_cmd.cmd[9]  <<  8) |
-                             (uint32_t)rx_cmd.cmd[10];
-            uint16_t num_pkts = ((uint16_t)rx_cmd.cmd[11] << 8) | (uint16_t)rx_cmd.cmd[12];
-            if (num_pkts == 0) num_pkts = 1;
+            uint16_t num_pkts = (cmd_pkts == 0) ? 1 : cmd_pkts;
 
-            /* Live HK (count 0/1): refresh beacon only. Do not stream N flash
-             * chunks — that raced M0+ (one 128 B live packet) and filled the ring. */
-            if (rx_cmd.cmd[4] == 0xF2 && num_pkts <= 1)
+            /* Live HK (count 0/1 at addr 0): refresh beacon only */
+            if (rx_cmd.cmd[4] == 0xF2 && num_pkts <= 1 && cmd_addr == 0)
               {
                 printf("[OBC_MAIN] Detected LIVE HK (1D D1 F2, pkts=%u) -> beacon telem only\n",
                        (unsigned)num_pkts);
@@ -2505,28 +3185,68 @@ static void process_ground_commands(void)
               }
             else
               {
-                const char *cmd_type_str = (rx_cmd.cmd[4] == 0xF8) ? "FLASH READ (1D D1 F8)" : "HK DOWNLOAD (1D D1 F2)";
-                printf("[OBC_MAIN] Detected %s: addr=0x%08lX pkts=%u -> Streaming %u chunks to M0+\n",
-                       cmd_type_str, (unsigned long)addr, (unsigned)num_pkts, (unsigned)num_pkts);
-
+                printf("[OBC_MAIN] Detected HK DOWNLOAD (1D D1 %02X): addr=0x%08lX pkts=%u\n",
+                       rx_cmd.cmd[4], (unsigned long)cmd_addr, (unsigned)num_pkts);
                 if (rx_cmd.cmd[4] == 0xF2)
                   {
                     pthread_mutex_lock(&g_beacon_mutex);
                     ipcc_m4_send(IPCC_CH_BEACON);
                     pthread_mutex_unlock(&g_beacon_mutex);
                   }
-
-                bool has_data = stream_hk_from_flash(addr, num_pkts);
-                if (has_data)
-                  {
-                    printf("[OBC_MAIN] %s chunks completed -> Notifying M0+ via IPCC\n", cmd_type_str);
-                  }
-                else
-                  {
-                    printf("[OBC_MAIN] %s data null/empty -> Rejecting & leaving ring buffer empty for M0+ NACK\n", cmd_type_str);
-                  }
+                stream_hk_from_flash(cmd_addr, num_pkts);
                 ipcc_m4_send(IPCC_CH_COMMAND);
               }
+          }
+        else if (rx_cmd.cmd[1] == CMD_TYPE_HK && rx_cmd.cmd[2] == 0x1D &&
+                 ((rx_cmd.cmd[3] == 0xD1 && (rx_cmd.cmd[4] == 0xF4 || rx_cmd.cmd[4] == 0xF8)) ||
+                  (rx_cmd.cmd[3] == 0xD2 && (rx_cmd.cmd[4] == 0xF7 || rx_cmd.cmd[4] == 0xF8))))
+          {
+            uint32_t addr = cmd_addr;
+            if (rx_cmd.cmd[3] == 0xD1 && rx_cmd.cmd[4] == 0xF4 && addr < FLASH_PART_RSV_ADDR)
+              {
+                addr += FLASH_PART_RSV_ADDR;
+              }
+            else if (rx_cmd.cmd[3] == 0xD2 && rx_cmd.cmd[4] == 0xF7 && addr < FLASH_PART_EPDM_ADDR)
+              {
+                addr += FLASH_PART_EPDM_ADDR;
+              }
+            else if (rx_cmd.cmd[3] == 0xD2 && rx_cmd.cmd[4] == 0xF8 && addr < FLASH_PART_ADCS_ADDR)
+              {
+                addr += FLASH_PART_ADCS_ADDR;
+              }
+
+            uint32_t rel = 0;
+            const struct flash_part_desc_s *part = flash_part_find_by_addr(addr, &rel);
+            uint16_t num_pkts = (cmd_pkts == 0) ? 1 : cmd_pkts;
+            printf("[OBC_MAIN] Partition Read (%02X %02X): part=%s addr=0x%08lX pkts=%u\n",
+                   rx_cmd.cmd[3], rx_cmd.cmd[4],
+                   part ? part->name : "UNKNOWN",
+                   (unsigned long)addr, (unsigned)num_pkts);
+
+            if (part != NULL && (part->base_addr == FLASH_PART_HK1_ADDR ||
+                                 part->base_addr == FLASH_PART_HK2_ADDR))
+              {
+                stream_hk_from_flash(addr, num_pkts);
+              }
+            else if (part != NULL && (part->base_addr == FLASH_PART_CAM_RGB_ADDR ||
+                                      part->base_addr == FLASH_PART_CAM_NIR_ADDR))
+              {
+                stream_real_camera_from_flash(addr, num_pkts);
+              }
+            else if (part != NULL)
+              {
+                stream_raw_partition_from_flash(part, rel, num_pkts);
+              }
+            ipcc_m4_send(IPCC_CH_COMMAND);
+          }
+        else if (rx_cmd.cmd[1] == CMD_TYPE_HK &&
+                 rx_cmd.cmd[2] == 0xFF &&
+                 rx_cmd.cmd[3] == 0xBE &&
+                 (rx_cmd.cmd[4] == 0xCC || rx_cmd.cmd[4] == 0xDD || rx_cmd.cmd[4] == 0xAA))
+          {
+            erase_all_flash_partitions(rx_cmd.cmd[4]);
+            SHARED_FLASH_REQ->seq = 1;
+            ipcc_m4_send(IPCC_CH_COMMAND);
           }
         else if (rx_cmd.cmd[1] == CMD_TYPE_HK &&
                  rx_cmd.cmd[2] == 0x1D &&
@@ -2537,6 +3257,24 @@ static void process_ground_commands(void)
             ipcc_m4_send(IPCC_CH_BEACON);
             pthread_mutex_unlock(&g_beacon_mutex);
             ipcc_m4_send(IPCC_CH_COMMAND); /* Signal M0+ task complete */
+          }
+        else if (rx_cmd.cmd[1] == CMD_TYPE_EPDM &&
+                 ((rx_cmd.cmd[2] == 0xCC && rx_cmd.cmd[3] == 0x5E && rx_cmd.cmd[4] == 0xBD) ||
+                  (rx_cmd.cmd[2] == 0xEC && rx_cmd.cmd[3] == 0xCF && rx_cmd.cmd[4] == 0xCF)))
+          {
+            printf("[OBC_MAIN] Command: EPDM RUN MISSION (3.3V only, 1 min)\n");
+            size_t epdm_len = epdm_capture_via_lpuart1();
+            SHARED_FLASH_REQ->seq = (epdm_len > 0) ? 1 : 0;
+            ipcc_m4_send(IPCC_CH_COMMAND);
+          }
+        else if (rx_cmd.cmd[1] == CMD_TYPE_ADCS &&
+                 ((rx_cmd.cmd[2] == 0xCC && rx_cmd.cmd[3] == 0x5E && rx_cmd.cmd[4] == 0xBD) ||
+                  (rx_cmd.cmd[2] == 0xA0 && rx_cmd.cmd[3] == 0x53 && rx_cmd.cmd[4] == 0xCF)))
+          {
+            printf("[OBC_MAIN] Command: ADCS RUN MISSION (5V+3.3V+PC13, 1 min @ 1 Hz)\n");
+            size_t adcs_len = adcs_capture_via_lpuart1();
+            SHARED_FLASH_REQ->seq = (adcs_len > 0) ? 1 : 0;
+            ipcc_m4_send(IPCC_CH_COMMAND);
           }
 
         /********************************************************************
@@ -3187,6 +3925,10 @@ int obc_main_main(int argc, char *argv[])
          TELEMETRY_INTERVAL_SEC);
   printf("=============================================================\n");
 
+  /* Initialize PA0 (5V DC/DC), PA12 (3.3V DC/DC), and PC13 (MSN Board) as OFF to save power */
+  obc_power_rails_init_off();
+  printf("[OBC_MAIN] [POWER] Power rails initialized OFF (PA0=OFF, PA12=OFF, PC13=OFF) - ON only on command\n");
+
   /**************************************************************************
    * 1. Initialize local telemetry ring buffer
    **************************************************************************/
@@ -3196,9 +3938,9 @@ int obc_main_main(int argc, char *argv[])
   telemetry_rb_init();
   rb_init();
   ensure_hk_partition_mounted();
-  ensure_camera_partition_mounted();
+  /* Camera & mission partitions are mounted on demand to preserve CPU1 SRAM heap */
 
-  printf("[OBC_MAIN] Telemetry & camera ring buffers + Flash partitions (/mnt/hk, /mnt/camera) initialized\n");
+  printf("[OBC_MAIN] Telemetry & camera ring buffers + HK flash partitions (/mnt/hk1, /mnt/hk2) initialized\n");
 
   /**************************************************************************
    * 2. Initialize shared SRAM2 IPC/ring buffers

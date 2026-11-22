@@ -37,7 +37,7 @@ build_all: build_sat_m0 build_gs build_m4
 	@echo "================================================================="
 	@echo "  Flashing Commands:"
 	@echo "    make flash_M4    -> Flash Satellite Cortex-M4 (0x08000000)"
-	@echo "    make flashsatM0  -> Flash Satellite Cortex-M0+ (0x08032000)"
+	@echo "    make flash_M0    -> Flash Satellite Cortex-M0+ (0x08032000)"
 	@echo "    make flash_GS    -> Flash Ground Station M0+   (0x08032000)"
 	@echo "================================================================="
 
@@ -67,7 +67,7 @@ build_gs:
 # This writes ONLY to sectors 0-99 (200 KB max).
 # CPU2 at 0x08032000 (sectors 100-127) is strictly preserved!
 # ==========================================================================
-flash_M4 flash_m4 flash_cpu1 flash_CPU1: $(M4_DIR)/.config
+flash_M4: $(M4_DIR)/.config
 	@if [ ! -f $(M4_DIR)/nuttx.bin ]; then \
 	  echo "$(M4_DIR)/nuttx.bin not found. Building NuttX..."; \
 	  $(MAKE) -C $(M4_DIR); \
@@ -82,23 +82,18 @@ flash_M4 flash_m4 flash_cpu1 flash_CPU1: $(M4_DIR)/.config
 # This writes ONLY to sectors 100-127 (56 KB max).
 # CPU1 at 0x08000000 (sectors 0-99) is strictly preserved!
 # ==========================================================================
-flashsatM0 flash_satM0 flash_satm0 flashsat flash_sat_m0 flash_sat flash_SAT flash_m0 flash_M0:
+flash_M0:
 	@echo ">>> Flashing Satellite Cortex-M0+ from $(SAT_CPU2_DIR)..."
-	$(MAKE) -C $(SAT_CPU2_DIR) flash_sat
+	$(MAKE) -C $(SAT_CPU2_DIR) flash_M0
 
 # ==========================================================================
 # 3. FLASH JC2 GROUND STATION CORTEX-M0+ (CPU2: 0x08032000 - 0x0803FFFF)
 # JC2 = Ground Station board. High Power RF path (+22 dBm internal PA).
 # Flashes the Ground Station firmware to the JC2 board.
 # ==========================================================================
-flash_GS flash_gs flash_cpu2_gs:
+flash_GS:
 	@echo ">>> Flashing Ground Station M0+ from $(GS_CPU2_DIR)..."
-	$(MAKE) -C $(GS_CPU2_DIR) flash_gs
-
-# ==========================================================================
-# COMBINED SATELLITE FLASHING (CPU1 + CPU2)
-# ==========================================================================
-flash_all_sat: flash_M4 flashsatM0
+	$(MAKE) -C $(GS_CPU2_DIR) flash_GS
 
 # ==========================================================================
 # CLEAN
@@ -124,4 +119,4 @@ legacy_gs_gui:
 build_gs_gui:
 	$(MAKE) -C Ground_Station/Desktop_GS_SOFTWARE-20261101T100316Z-1-001/Desktop_GS_SOFTWARE/NAST_GS_CODE build
 
-.PHONY: all build_all configure_m4 build_m4 build_sat_m0 build_gs flash_M4 flash_m4 flash_cpu1 flash_CPU1 flashsatM0 flash_sat_m0 flash_sat flash_SAT flash_m0 flash_M0 flash_GS flash_gs flash_cpu2_gs flash_all_sat clean clean_m0 gs_gui desktop_gs run_gs_gui run_gs legacy_gs_gui build_gs_gui
+.PHONY: all build_all configure_m4 build_m4 build_sat_m0 build_gs flash_M4 flash_M0 flash_GS clean clean_m0 gs_gui desktop_gs run_gs_gui run_gs legacy_gs_gui build_gs_gui

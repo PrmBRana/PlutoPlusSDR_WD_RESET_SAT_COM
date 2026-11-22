@@ -8,8 +8,8 @@
  *
  * Frequencies
  * ───────────
- *   GS TX  (uplink)   : 437.375 MHz   → satellite RX
- *   GS RX  (downlink) : 435.000 MHz   ← satellite TX (CW beacon + GMSK data)
+ *   GS TX  (uplink)   : 435.313 MHz   → satellite RX
+ *   GS RX  (downlink) : 437.375 MHz   ← satellite TX (CW beacon + GMSK data)
  *
  * Receive pipeline (downlink)
  * ───────────────────────────
@@ -63,8 +63,8 @@
 /* ============================================================================
  * FREQUENCIES
  * ========================================================================== */
-#define GS_UPLINK_FREQ_HZ    437375000UL   /* GS TX → satellite RX */
-#define GS_DOWNLINK_FREQ_HZ  435000000UL   /* satellite TX → GS RX (CW + GMSK) */
+#define GS_UPLINK_FREQ_HZ    435313000UL   /* GS TX → satellite RX (435.313 MHz) */
+#define GS_DOWNLINK_FREQ_HZ  437375000UL   /* satellite TX → GS RX (435.313 MHz, CW + GMSK) */
 
 /* Send 2 packets per command so the sat G3RUH descrambler can lock */
 #define GS_SEND_COUNT         2
@@ -263,7 +263,7 @@ static void GS_Print_RF_Pins(void)
 }
 
 /* ============================================================================
- * START RX  (arms receiver on downlink frequency 435.000 MHz)
+ * START RX  (arms receiver on downlink frequency 437.375 MHz)
  * ========================================================================== */
 void GS_StartRx(void)
 {
@@ -346,7 +346,7 @@ static void GS_CW_Event(CwEvt_t evt, char ch, const char *text,
                 }
             }
         }
-        uart2_puts("  >>> [CW BEACON FINISHED] Satellite is now in 50s RX listen mode on 437.375 MHz. Send command NOW! <<<\r\n");
+        uart2_puts("  >>> [CW BEACON FINISHED] Satellite is now in 50s RX listen mode on 435.313 MHz. Send command NOW! <<<\r\n");
         break;
     }
     (void)ch;
@@ -1018,7 +1018,7 @@ void GS_Init(const GroundStationConfig_t *config)
     if (config != NULL) s_config = *config;
     else                s_config = GroundStationDefaultConfig;
 
-    /* GS TX = 437.375 MHz (HP), GS RX = 435.000 MHz */
+    /* GS TX = 435.313 MHz (HP), GS RX = 437.375 MHz */
     s_config.radio.txFrequency = GS_UPLINK_FREQ_HZ;
     s_config.radio.rxFrequency = GS_DOWNLINK_FREQ_HZ;
 
@@ -1031,16 +1031,16 @@ void GS_Init(const GroundStationConfig_t *config)
 
     s_last_auto_cmd_time_ms = GS_GetTimeMs();
 
-    /* Initialise CW decoder (435.000 MHz RX path) */
+    /* Initialise CW decoder (437.375 MHz RX path) */
     CwRx_Init(GS_CW_Event, GS_GetTimeMs());
 
     uart2_puts("\r\n========================================================================\r\n");
     uart2_puts("  ANTARIKCHYA PRATISTHAN NEPAL (APN)  —  S2S-2 GROUND STATION\r\n");
     uart2_puts("  FW-ID: GS-G3RUH-20261006 | RFO_HP +22 dBm | FULL DOWNLINK DECODE\r\n");
     uart2_puts("========================================================================\r\n");
-    uart2_printf("  Uplink TX       : %lu Hz  (437.375 MHz, RFO_HP, +22 dBm)\r\n",
+    uart2_printf("  Uplink TX       : %lu Hz  (435.313 MHz, RFO_HP, +22 dBm)\r\n",
                  (unsigned long)s_config.radio.txFrequency);
-    uart2_printf("  Downlink RX     : %lu Hz  (435.000 MHz, CW + GMSK 4800 bps)\r\n",
+    uart2_printf("  Downlink RX     : %lu Hz  (437.375 MHz, CW + GMSK 4800 bps)\r\n",
                  (unsigned long)s_config.radio.rxFrequency);
     uart2_puts(  "  Downlink framing: 128-bit preamble + sync word 93 0B 51 DE + 200 B\r\n");
     uart2_puts(  "  Decode pipeline : G3RUH descramble → AX.25 FCS → payload dispatch\r\n");
@@ -1088,7 +1088,7 @@ bool GS_Send_Burst_Packet(const uint8_t *payload, uint16_t len, uint8_t burst_co
         Print_Hex_Bytes(ax25_clean, ax25_len);
         Print_AX25_Fields("TX AX.25", ax25_clean, ax25_len);
         uart2_puts(">>> [ENCODE] AX.25 -> HDLC stuff -> NRZI -> G3RUH scramble (200 B)\r\n");
-        uart2_puts(">>> [RF] 128-bit preamble + sync 93 0B 51 DE + G3RUH payload @ 437.375 MHz\r\n");
+        uart2_puts(">>> [RF] 128-bit preamble + sync 93 0B 51 DE + G3RUH payload @ 435.313 MHz\r\n");
     }
 
     uart2_printf(
@@ -1222,9 +1222,9 @@ void GS_Print_Help(void)
 void GS_Print_Status(void)
 {
     uart2_puts("\r\n=== GROUND STATION STATUS ===\r\n");
-    uart2_printf("  TX Frequency  : %lu Hz (437.375 MHz uplink)\r\n",
+    uart2_printf("  TX Frequency  : %lu Hz (435.313 MHz uplink)\r\n",
                  (unsigned long)s_config.radio.txFrequency);
-    uart2_printf("  RX Frequency  : %lu Hz (435.000 MHz downlink)\r\n",
+    uart2_printf("  RX Frequency  : %lu Hz (437.375 MHz downlink)\r\n",
                  (unsigned long)s_config.radio.rxFrequency);
     uart2_printf("  TX Power      : %+d dBm (%s)\r\n",
                  (int)RadioApp_GetTxPower(),
@@ -1517,7 +1517,7 @@ int main(void)
 
     char line_buf[CMD_LINE_MAX];
 
-    uart2_puts("Ground Station Ready. RX armed on 435.000 MHz.\r\n");
+    uart2_puts("Ground Station Ready. RX armed on 437.375 MHz.\r\n");
     uart2_puts("Type '?' or 'HELP' for command list.\r\n> ");
 
     while (1)

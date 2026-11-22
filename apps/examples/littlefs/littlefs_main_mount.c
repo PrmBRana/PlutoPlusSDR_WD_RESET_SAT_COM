@@ -43,6 +43,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -513,10 +514,16 @@ static int erase_flash_die(FAR struct spi_dev_s *spi, uint32_t address)
  *   failure.
  ****************************************************************************/
 
-static int mount_drive(FAR const char *dev_path, FAR const char *mount_path)
+static int mount_drive_ex(FAR const char *dev_path, FAR const char *mount_path,
+                          FAR bool *already_mounted)
 {
   struct stat st;
   int ret;
+
+  if (already_mounted != NULL)
+    {
+      *already_mounted = false;
+    }
 
   printf("Mounting drive %s to %s...\n", dev_path, mount_path);
 
@@ -533,30 +540,51 @@ static int mount_drive(FAR const char *dev_path, FAR const char *mount_path)
   ret = mount(dev_path, mount_path, "littlefs", 0, "autoformat");
   if (ret < 0)
     {
-      if (errno == EBUSY || errno == ENOTDIR || errno == EEXIST)
+      int err = errno;
+      if (err == EBUSY || err == ENOTDIR || err == EEXIST)
         {
           /* Already mounted: perfectly normal, not an error */
+          if (already_mounted != NULL)
+            {
+              *already_mounted = true;
+            }
           return OK;
         }
 
-      printf("WARN: autoformat failed (errno=%d), trying forceformat...\n", errno);
+      if (err == ENOMEM)
+        {
+          printf("ERROR: mount %s failed: out of memory (ENOMEM)\n", dev_path);
+          return -ENOMEM;
+        }
+
+      printf("WARN: autoformat failed (errno=%d), trying forceformat...\n", err);
 
       /* If unformatted, forceformat will format the partition cleanly */
       ret = mount(dev_path, mount_path, "littlefs", 0, "forceformat");
       if (ret < 0)
         {
-          if (errno == EBUSY || errno == ENOTDIR || errno == EEXIST)
+          err = errno;
+          if (err == EBUSY || err == ENOTDIR || err == EEXIST)
             {
+              if (already_mounted != NULL)
+                {
+                  *already_mounted = true;
+                }
               return OK;
             }
 
-          printf("ERROR: mount failed (ret=%d, errno=%d)\n", ret, errno);
-          return ret;
+          printf("ERROR: mount failed (ret=%d, errno=%d)\n", ret, err);
+          return -err;
         }
     }
 
   printf("RESULT: [PASS] Drive %s mounted at %s!\n", dev_path, mount_path);
   return OK;
+}
+
+static int mount_drive(FAR const char *dev_path, FAR const char *mount_path)
+{
+  return mount_drive_ex(dev_path, mount_path, NULL);
 }
 
 /****************************************************************************
@@ -597,7 +625,9 @@ static int clean_one_partition(FAR const char *dev_path, FAR const char *mount_p
 static int format_one_partition(FAR const char *dev_path, FAR const char *mount_path)
 {
   printf("[LITTLEFS] Formatting %s at %s with 256B page geometry...\n", dev_path, mount_path);
+  mkdir("/mnt", 0777);
   umount(mount_path);
+  mkdir(mount_path, 0777);
 
   int ret = mount(dev_path, mount_path, "littlefs", 0, "forceformat");
   if (ret < 0)
@@ -613,7 +643,10 @@ static int format_one_partition(FAR const char *dev_path, FAR const char *mount_
       return ret;
     }
 
-  printf("[LITTLEFS] [PASS] %s successfully formatted and mounted at %s!\n", dev_path, mount_path);
+  /* Unmount immediately so RAM is freed before formatting other partitions */
+  umount(mount_path);
+
+  printf("[LITTLEFS] [PASS] %s successfully formatted!\n", dev_path);
   return OK;
 }
 
@@ -621,13 +654,21 @@ static int format_one_partition(FAR const char *dev_path, FAR const char *mount_
  * Name: clean_one_partition
  *
  * Description:
- *   Mount one partition (if not already mounted) and delete every file
- *   in its root directory, without reformatting the filesystem itself.
+ *   Mount one partition (if not already mounted), delete every file in its
+ *   root directory without reformatting, and unmount if we mounted it so
+ *   heap RAM is not exhausted across 11 partitions.
  ****************************************************************************/
 
 static int clean_one_partition(FAR const char *dev_path, FAR const char *mount_path)
 {
-  mount_drive(dev_path, mount_path);
+  bool already_mounted = false;
+  int ret = mount_drive_ex(dev_path, mount_path, &already_mounted);
+  if (ret < 0)
+    {
+      printf("[LITTLEFS] ERROR: Could not mount %s for cleaning (ret=%d)\n",
+             dev_path, ret);
+      return ret;
+    }
 
   DIR *d = opendir(mount_path);
   if (d)
@@ -653,8 +694,18 @@ static int clean_one_partition(FAR const char *dev_path, FAR const char *mount_p
     }
   else
     {
-      printf("[LITTLEFS] Could not open %s (errno=%d)\n", mount_path, errno);
-      return -errno;
+      int err = errno;
+      printf("[LITTLEFS] Could not open %s (errno=%d)\n", mount_path, err);
+      if (!already_mounted)
+        {
+          umount(mount_path);
+        }
+      return -err;
+    }
+
+  if (!already_mounted)
+    {
+      umount(mount_path);
     }
 
   return OK;
@@ -904,259 +955,13 @@ static int littlefs_hardware_test(void)
  *        the append once.
  ****************************************************************************/
 
-static uint16_t hk_crc16(const uint8_t *buf, uint16_t len)
-{
-  uint16_t crc = 0xFFFFU;
-  for (uint16_t i = 0; i < len; i++)
-    {
-      crc ^= ((uint16_t)buf[i] << 8);
-      for (uint8_t b = 0; b < 8; b++)
-        {
-          crc = (crc & 0x8000U) ? ((crc << 1) ^ 0x1021U) : (crc << 1);
-        }
-    }
-  return crc;
-}
-
 static int littlefs_telemetry_daemon(void)
 {
-  struct telemetry_envelope_s env;
-  static struct adc1_packet_s s_cached_adc1;
-  static bool s_have_adc1 = false;
-  struct stat st;
-  const char *filename;
-  int fd;
-  ssize_t written;
-  ssize_t nread;
-  int ret;
-  uint32_t packet_num = 0;
-
-  printf("\n=======================================================\n");
-  printf("  [LITTLEFS DAEMON] Telemetry & Camera Storage Consumer\n");
-  printf("  Mount 1: /dev/hk     (64 MB - Die 0) -> /mnt/hk\n");
-  printf("  Mount 2: /dev/camera (64 MB - Die 1) -> /mnt/camera\n");
-  printf("=======================================================\n");
-
-  rb_init();
-
-  /* 1. Mount Unified Partition: /dev/hk (64 MB) to /mnt/hk */
-  ret = mount_drive("/dev/hk", "/mnt/hk");
-  if (ret != OK)
-    {
-      printf("[LITTLEFS DAEMON] WARNING: mount_drive(/dev/hk) returned %d (storage offline)\n", ret);
-    }
-  else
-    {
-      printf("[LITTLEFS DAEMON] Ready! /mnt/hk mounted successfully!\n");
-    }
-
-  /* 2. Mount Camera Partition: /dev/camera (64 MB) to /mnt/camera */
-  ret = mount_drive("/dev/camera", "/mnt/camera");
-  if (ret != OK)
-    {
-      printf("[LITTLEFS DAEMON] WARNING: mount_drive(/dev/camera) returned %d\n", ret);
-    }
-  else
-    {
-      printf("[LITTLEFS DAEMON] Ready! /mnt/camera mounted successfully!\n");
-    }
-
-  printf("[LITTLEFS DAEMON] Waiting for OBC_main telemetry & camera signals...\n");
-
-  while (1)
-    {
-      /* 3. Sleep until notified by OBC_main (0% CPU while waiting) */
-      sem_wait(&g_telemetry_sem);
-
-      /* Drain any pending camera burst chunks from ring buffer to /mnt/camera */
-      if (!rb_empty())
-        {
-          cam_rb_drain_to_flash();
-        }
-
-      /* Hold off HK flash writes if M0+ is actively downlinking to prevent power spikes */
-      while (sat_is_downlink_active())
-        {
-          if (!rb_empty())
-            {
-              cam_rb_drain_to_flash();
-            }
-          usleep(100000);
-        }
-
-      /* 4. Pop all pending packets from the ring buffer */
-      while (telemetry_rb_read(&env) == 0)
-        {
-          packet_num++;
-
-          /* ================================================================= */
-          /* ROUTE 1: Footer 0xAA55 -> /mnt/hk/telemetry.bin (ADC 1: 34 Bytes) */
-          /* ================================================================= */
-
-          if (env.footer == TELEM_FOOTER_ADC1)
-            {
-              s_cached_adc1 = env.pkt.adc1;
-              s_have_adc1 = true;
-
-              printf("\n[LITTLEFS DAEMON] ===> RECEIVED ADC1 ENVELOPE (Len: %d B, Footer: 0x%04X) <===\n",
-                     env.len, env.footer);
-
-              static const char * const adc1_names[ADC1_CHANNELS_COUNT] =
-              {
-                "ADC_BAT_MON", "TOTAL_SOLAR_V", "RAW_VOLT", "SP5_VOLT",
-                "SP4_VOLT",    "SP3_VOLT",      "SP1_VOLT", "SP2_VOLT",
-                "ANT_TEMP",    "BATT_TEMP",     "TEMP_BPB", "TEMP1",
-                "TEMP5",       "TEMP4",         "TEMP3",    "TEMP2"
-              };
-
-              printf("[LITTLEFS DAEMON] [BUFFERED ADC1 - ALL 16 CHANNELS]:\n");
-              for (int k = 0; k < ADC1_CHANNELS_COUNT; k++)
-                {
-                  const char *unit = (k < 8) ? "V" : "C";
-                  printf("  [%02d] %-14s : %6.2f %s   (x100: %6d)\n",
-                         k, adc1_names[k], (float)s_cached_adc1.data[k] / 100.0f,
-                         unit, s_cached_adc1.data[k]);
-                }
-              printf("  [--] Footer Check    : 0x%04X   [BUFFERED FOR 128B FLASH RECORD]\n", s_cached_adc1.footer);
-            }
-
-          /* ================================================================= */
-          /* ROUTE 2: Footer 0xBB66 -> /mnt/hk/telemetry.bin (128-Byte HK Record) */
-          /* ================================================================= */
-
-          else if (env.footer == TELEM_FOOTER_ADC2)
-            {
-              filename = "/mnt/hk/telemetry.bin";
-              printf("\n[LITTLEFS DAEMON] ===> RECEIVED ADC2 ENVELOPE (Len: %d B, Footer: 0x%04X) -> WRITING 128B HK RECORD <===\n",
-                     env.len, env.footer);
-
-              uint8_t hk128[128];
-              memset(hk128, 0, sizeof(hk128));
-
-              if (s_have_adc1)
-                {
-                  memcpy(&hk128[0], s_cached_adc1.data, 32);
-                }
-              hk128[32] = 0x55;
-              hk128[33] = 0xAA;
-
-              memcpy(&hk128[34], env.pkt.adc2.data, 24);
-              memcpy(&hk128[58], &env.pkt.adc2.gyro_x, 12);
-
-              hk128[70] = 0x66;
-              hk128[71] = 0xBB;
-
-              static uint32_t s_hk_flash_seq = 0;
-              s_hk_flash_seq++;
-              struct timespec ts;
-              clock_gettime(CLOCK_MONOTONIC, &ts);
-              uint32_t now_ms = (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
-
-              memcpy(&hk128[72], &s_hk_flash_seq, 4);
-              memcpy(&hk128[76], &now_ms, 4);
-
-              uint16_t crc = hk_crc16(hk128, 124);
-              hk128[124] = (uint8_t)(crc & 0xFF);
-              hk128[125] = (uint8_t)(crc >> 8);
-
-              hk128[126] = 0xAA;
-              hk128[127] = 0xCC;
-
-              fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0666);
-              if (fd >= 0)
-                {
-                  written = write(fd, hk128, sizeof(hk128));
-                  fsync(fd);
-                  close(fd);
-
-                  if (written < 0)
-                    {
-                      printf("[LITTLEFS DAEMON] ERROR: write() failed on %s (written=%zd, errno=%d)\n",
-                             filename, written, errno);
-                      if (errno == EFAULT)
-                        {
-                          printf("[LITTLEFS DAEMON] Old flash format detected (EFAULT). Auto-formatting /dev/hk with 256B geometry...\n");
-                          umount("/mnt/hk");
-                          mount("/dev/hk", "/mnt/hk", "littlefs", 0, "forceformat");
-                          fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0666);
-                          if (fd >= 0)
-                            {
-                              written = write(fd, hk128, sizeof(hk128));
-                              fsync(fd);
-                              close(fd);
-                              printf("[LITTLEFS DAEMON] [RECOVERED HK] Appended %zd Bytes to %s\n", written, filename);
-                            }
-                        }
-                      continue;
-                    }
-
-                  printf("[LITTLEFS DAEMON] [STORED HK 128B] Appended %zd Bytes to %s\n", written, filename);
-
-                  /* Read back and verify from physical Flash */
-                  fd = open(filename, O_RDONLY);
-                  if (fd >= 0)
-                    {
-                      uint8_t verify128[128];
-                      lseek(fd, -(off_t)sizeof(verify128), SEEK_END);
-                      memset(verify128, 0, sizeof(verify128));
-                      nread = read(fd, verify128, sizeof(verify128));
-                      close(fd);
-
-                      if (nread == sizeof(verify128) &&
-                          memcmp(hk128, verify128, sizeof(verify128)) == 0)
-                        {
-                          static const char * const adc2_names[ADC2_ACTIVE_CHANNELS] =
-                          {
-                            "UNREG_I",       "MAIN_3V3_I",    "5V_I",        "BAT_I",
-                            "SP1_I",         "SP2_I",         "SP3_I",       "SP4_I",
-                            "SP5_I",         "RAW_I",         "MISSION_3V3", "SPT_I"
-                          };
-
-                          stat(filename, &st);
-                          printf("[LITTLEFS DAEMON] [VERIFIED IN FLASH /mnt/hk - ALL 12 CHANNELS + IMU]:\n");
-                          for (int k = 0; k < ADC2_ACTIVE_CHANNELS; k++)
-                            {
-                              printf("  [%02d] %-14s : %6.2f A   (x100: %6d)\n",
-                                     k, adc2_names[k], (float)env.pkt.adc2.data[k] / 100.0f,
-                                     env.pkt.adc2.data[k]);
-                            }
-                          printf("  [GYRO] X: %6.2f dps | Y: %6.2f dps | Z: %6.2f dps (x100: %d, %d, %d)\n",
-                                 (float)env.pkt.adc2.gyro_x / 100.0f,
-                                 (float)env.pkt.adc2.gyro_y / 100.0f,
-                                 (float)env.pkt.adc2.gyro_z / 100.0f,
-                                 env.pkt.adc2.gyro_x, env.pkt.adc2.gyro_y, env.pkt.adc2.gyro_z);
-                          printf("  [MAG]  X: %6.3f G   | Y: %6.3f G   | Z: %6.3f G   (x100: %d, %d, %d)\n",
-                                 (float)env.pkt.adc2.mag_x / 100.0f,
-                                 (float)env.pkt.adc2.mag_y / 100.0f,
-                                 (float)env.pkt.adc2.mag_z / 100.0f,
-                                 env.pkt.adc2.mag_x, env.pkt.adc2.mag_y, env.pkt.adc2.mag_z);
-                          printf("  [--] Footers: 0x%02X%02X, 0x%02X%02X, 0x%02X%02X | CRC: 0x%04X [MATCHED 100%%]\n",
-                                 verify128[33], verify128[32], verify128[71], verify128[70], verify128[127], verify128[126], crc);
-                          printf("[LITTLEFS DAEMON] [PASS HK 128B] File Size: %ld B (%ld Records in /mnt/hk)\n",
-                                 (long)st.st_size, (long)(st.st_size / 128));
-                        }
-                      else
-                        {
-                          printf("[LITTLEFS DAEMON] [FAIL] Read-back mismatch in %s! (nread=%zd, memcmp=%d)\n",
-                                 filename, nread, memcmp(hk128, verify128, sizeof(verify128)));
-                        }
-                    }
-                  else
-                    {
-                      printf("[LITTLEFS DAEMON] ERROR opening %s for read (errno=%d)\n", filename, errno);
-                    }
-                }
-              else
-                {
-                  printf("[LITTLEFS DAEMON] ERROR opening %s for write (errno=%d)\n", filename, errno);
-                }
-            }
-        }
-
-      printf("[LITTLEFS DAEMON] All packets stored and verified. Sleeping...\n\n");
-    }
-
-  return 0;
+  /* Run the unified single-ring-buffer, single-active-mount storage consumer
+   * for all 11 MT25Q partitions (HK1, HK2, ADCS, CAM_RGB, CAM_NIR, EPDM,
+   * DPM, RSV_Table, Imp_Flags, Part_Size, Seek_Ptr).
+   */
+  return storage_consumer_run();
 }
 
 /****************************************************************************
@@ -1290,6 +1095,94 @@ static void __attribute__((unused)) send_brust_HK(uint32_t start_address, uint16
   (void)packet_count;
 }
 
+struct lfs_part_info_s
+{
+  FAR const char *key;
+  FAR const char *alias;
+  FAR const char *label;
+  FAR const char *dev_path;
+  FAR const char *mnt_path;
+  FAR const char *default_file;
+  uint32_t        size_mb;
+};
+
+static const struct lfs_part_info_s g_lfs_parts[] =
+{
+  { "hk1",       NULL,    "HK_1 (ADC1 & ADC2)",      "/dev/hk1",       "/mnt/hk1",       "/mnt/hk1/telemetry.bin",      32 },
+  { "hk2",       NULL,    "HK_2 (Mag & Gyro)",       "/dev/hk2",       "/mnt/hk2",       "/mnt/hk2/imu.bin",            32 },
+  { "adcs",      NULL,    "ADCS MSN",                "/dev/adcs",      "/mnt/adcs",      "/mnt/adcs/adcs.bin",           8 },
+  { "cam_rgb",   "rgb",   "CAM RGB MSN",             "/dev/cam_rgb",   "/mnt/cam_rgb",   "/mnt/cam_rgb/capture_01.raw", 16 },
+  { "cam_nir",   "nir",   "CAM NIR MSN",             "/dev/cam_nir",   "/mnt/cam_nir",   "/mnt/cam_nir/capture_02.raw", 16 },
+  { "epdm",      NULL,    "EPDM MSN",                "/dev/epdm",      "/mnt/epdm",      "/mnt/epdm/epdm.bin",           8 },
+  { "dpm",       NULL,    "DP-M MSN",                "/dev/dpm",       "/mnt/dpm",       "/mnt/dpm/dpm.bin",             8 },
+  { "rsv_table", "rsv",   "RSV_Table",               "/dev/rsv_table", "/mnt/rsv_table", "/mnt/rsv_table/rsv.bin",       2 },
+  { "imp_flags", "flags", "Important Flags",         "/dev/imp_flags", "/mnt/imp_flags", "/mnt/imp_flags/flags.bin",     2 },
+  { "part_size", "size",  "All Partition File Size", "/dev/part_size", "/mnt/part_size", "/mnt/part_size/size.bin",      2 },
+  { "seek_ptr",  "seek",  "Seek_Pointer",            "/dev/seek_ptr",  "/mnt/seek_ptr",  "/mnt/seek_ptr/seek.bin",       2 },
+};
+
+#define LFS_NUM_PARTS (sizeof(g_lfs_parts) / sizeof(g_lfs_parts[0]))
+
+/****************************************************************************
+ * Name: apply_partition_op
+ *
+ * Description:
+ *   Apply `op` (clean_one_partition or format_one_partition) to the target
+ *   partition(s): "all" (or NULL), "hk" (hk1+hk2), "camera"/"cam"
+ *   (cam_rgb+cam_nir), or any individual partition key/alias.
+ ****************************************************************************/
+
+static int apply_partition_op(FAR const char *target,
+                              int (*op)(FAR const char *, FAR const char *),
+                              FAR const char *op_name)
+{
+  int ret = OK;
+
+  if (target == NULL || strcasecmp(target, "all") == 0)
+    {
+      printf("[LITTLEFS] %s all %zu flash partitions...\n", op_name, LFS_NUM_PARTS);
+      for (size_t i = 0; i < LFS_NUM_PARTS; i++)
+        {
+          int r = op(g_lfs_parts[i].dev_path, g_lfs_parts[i].mnt_path);
+          if (r < 0)
+            {
+              ret = r;
+            }
+        }
+      return ret;
+    }
+
+  if (strcasecmp(target, "hk") == 0)
+    {
+      printf("[LITTLEFS] %s HK partitions (hk1, hk2)...\n", op_name);
+      int r1 = op("/dev/hk1", "/mnt/hk1");
+      int r2 = op("/dev/hk2", "/mnt/hk2");
+      return (r1 < 0) ? r1 : r2;
+    }
+
+  if (strcasecmp(target, "camera") == 0 || strcasecmp(target, "cam") == 0)
+    {
+      printf("[LITTLEFS] %s Camera partitions (cam_rgb, cam_nir)...\n", op_name);
+      int r1 = op("/dev/cam_rgb", "/mnt/cam_rgb");
+      int r2 = op("/dev/cam_nir", "/mnt/cam_nir");
+      return (r1 < 0) ? r1 : r2;
+    }
+
+  for (size_t i = 0; i < LFS_NUM_PARTS; i++)
+    {
+      if (strcasecmp(target, g_lfs_parts[i].key) == 0 ||
+          (g_lfs_parts[i].alias != NULL && strcasecmp(target, g_lfs_parts[i].alias) == 0))
+        {
+          return op(g_lfs_parts[i].dev_path, g_lfs_parts[i].mnt_path);
+        }
+    }
+
+  printf("[LITTLEFS] Unknown partition target: '%s'\n", target);
+  printf("Valid targets: all | hk | hk1 | hk2 | adcs | camera | cam_rgb | cam_nir | "
+         "epdm | dpm | rsv_table | imp_flags | part_size | seek_ptr\n");
+  return -EINVAL;
+}
+
 /****************************************************************************
  * Name: print_partition_sizes
  *
@@ -1305,37 +1198,35 @@ static int print_partition_sizes(void)
   printf("  Total Flash Capacity: 1 Gbit / 128 MB (Die 0: 64MB, Die 1: 64MB)\n");
   printf("=================================================================\n");
 
-  /* Auto-mount partitions to inspect sizes */
-  mount_drive("/dev/hk", "/mnt/hk");
-  mount_drive("/dev/camera", "/mnt/camera");
+  for (size_t i = 0; i < LFS_NUM_PARTS; i++)
+    {
+      bool already_mounted = false;
+      int mret = mount_drive_ex(g_lfs_parts[i].dev_path, g_lfs_parts[i].mnt_path,
+                                &already_mounted);
+      printf("  [%2zu] %-14s (%2lu MB) -> %-14s (%s)\n",
+             i + 1,
+             g_lfs_parts[i].dev_path,
+             (unsigned long)g_lfs_parts[i].size_mb,
+             g_lfs_parts[i].mnt_path,
+             g_lfs_parts[i].label);
 
-  printf("  Partition 1: /dev/hk     (64 MB - Die 0) -> Mount: /mnt/hk\n");
-  if (stat("/mnt/hk/telemetry.bin", &st) == 0)
-    {
-      printf("    File: /mnt/hk/telemetry.bin | Size: %ld Bytes\n", (long)st.st_size);
-    }
-  else
-    {
-      printf("    File: /mnt/hk/telemetry.bin | Size: 0 Bytes (empty / not recorded yet)\n");
+      if (mret == OK && stat(g_lfs_parts[i].default_file, &st) == 0)
+        {
+          printf("       File: %s | Size: %ld Bytes\n",
+                 g_lfs_parts[i].default_file, (long)st.st_size);
+        }
+      else
+        {
+          printf("       File: %s | Size: 0 Bytes (empty)\n",
+                 g_lfs_parts[i].default_file);
+        }
+
+      if (mret == OK && !already_mounted)
+        {
+          umount(g_lfs_parts[i].mnt_path);
+        }
     }
 
-  printf("  Partition 2: /dev/camera (64 MB - Die 1) -> Mount: /mnt/camera\n");
-  if (stat("/mnt/camera/capture_01.raw", &st) == 0)
-    {
-      printf("    File: /mnt/camera/capture_01.raw | Size: %ld Bytes\n", (long)st.st_size);
-    }
-  else
-    {
-      printf("    File: /mnt/camera/capture_01.raw | Size: 0 Bytes (empty / not captured yet)\n");
-    }
-  if (stat("/mnt/camera/capture_02.raw", &st) == 0)
-    {
-      printf("    File: /mnt/camera/capture_02.raw | Size: %ld Bytes\n", (long)st.st_size);
-    }
-  else
-    {
-      printf("    File: /mnt/camera/capture_02.raw | Size: 0 Bytes (empty / not captured yet)\n");
-    }
   printf("=================================================================\n\n");
   return 0;
 }
@@ -1351,25 +1242,18 @@ static int littlefs_erase_cmd(int argc, FAR char *argv[])
 {
   if (argc < 3)
     {
-      printf("[LITTLEFS] No partition specified. Erasing/cleaning all partitions (HK, Camera)...\n");
-      format_one_partition("/dev/hk", "/mnt/hk");
-      format_one_partition("/dev/camera", "/mnt/camera");
-      printf("\n[TIP] You can also target specific partitions:\n");
-      printf("  littlefs erase hk      - Erase/format HK partition (64 MB)\n");
-      printf("  littlefs erase camera  - Erase/format Camera partition (64 MB)\n");
-      printf("  littlefs erase all     - Full 128MB chip erase\n\n");
-      return 0;
+      int ret = apply_partition_op("all", format_one_partition, "Formatting");
+      printf("\n[TIP] You can also target specific partitions or raw flash:\n");
+      printf("  littlefs erase hk|hk1|hk2|camera|cam_rgb|cam_nir|adcs|epdm|dpm|rsv_table|imp_flags|part_size|seek_ptr\n");
+      printf("  littlefs erase all            - Full 128MB hardware chip erase\n");
+      printf("  littlefs erase die [addr]     - 64MB hardware die erase (0x00000000 / 0x04000000)\n\n");
+      return ret;
     }
 
-  if (strcmp(argv[2], "hk") == 0 || strcmp(argv[2], "hk1") == 0 || strcmp(argv[2], "hk2") == 0)
-    {
-      return format_one_partition("/dev/hk", "/mnt/hk");
-    }
-  else if (strcmp(argv[2], "camera") == 0 || strcmp(argv[2], "cam") == 0)
-    {
-      return format_one_partition("/dev/camera", "/mnt/camera");
-    }
-  else
+  /* Hardware-level raw SPI NOR erase commands */
+  if (strcmp(argv[2], "all") == 0 || strcmp(argv[2], "chip") == 0 ||
+      strcmp(argv[2], "die") == 0 || strcmp(argv[2], "64kb") == 0 ||
+      strcmp(argv[2], "32kb") == 0 || strcmp(argv[2], "4kb") == 0)
     {
       FAR struct spi_dev_s *spi = init_spi(SPI_PORT);
       if (spi == NULL)
@@ -1400,18 +1284,16 @@ static int littlefs_erase_cmd(int argc, FAR char *argv[])
           if (argc > 3) addr = (uint32_t)strtoul(argv[3], NULL, 0);
           return erase_flash_32kb(spi, addr);
         }
-      else if (strcmp(argv[2], "4kb") == 0)
+      else
         {
           uint32_t addr = 0;
           if (argc > 3) addr = (uint32_t)strtoul(argv[3], NULL, 0);
           return erase_flash_4kb(spi, addr);
         }
-      else
-        {
-          printf("Unknown erase target: %s\n", argv[2]);
-          return -EINVAL;
-        }
     }
+
+  /* Partition-level LittleFS forceformat */
+  return apply_partition_op(argv[2], format_one_partition, "Formatting");
 }
 
 /****************************************************************************
@@ -1420,17 +1302,17 @@ static int littlefs_erase_cmd(int argc, FAR char *argv[])
 
 /****************************************************************************
  * Name: littlefs_main
- *,
+ *
  * Description:
  *   NSH entry point.
  *
- *     littlefs                         -> run telemetry storage daemon
- *     littlefs read   [hk1|hk2]        -> dump stored telemetry records
- *     littlefs clean  [hk1|hk2|camera] -> delete files, keep format
- *     littlefs format [hk1|hk2|camera] -> force-reformat LittleFS partition
- *     littlefs erase  [hk1|hk2|camera|chip|die|4kb|32kb|64kb] -> flash erase
+ *     littlefs                       -> run telemetry storage daemon
+ *     littlefs read   [hk1|hk2]      -> dump stored telemetry records
+ *     littlefs clean  [target|all]   -> delete files, keep format
+ *     littlefs format [target|all]   -> force-reformat LittleFS partition(s)
+ *     littlefs erase  [target|all|chip|die|4kb|32kb|64kb] -> flash erase
  *     littlefs size   [partition/info] -> show partition table & file sizes
- *     littlefs test                    -> run low-level SPI NOR self-test
+ *     littlefs test                  -> run low-level SPI NOR self-test
  ****************************************************************************/
 
 int littlefs_main(int argc, FAR char *argv[])
@@ -1456,39 +1338,13 @@ int littlefs_main(int argc, FAR char *argv[])
         }
       else if (strcmp(argv[1], "clean") == 0 || strcmp(argv[1], "clear") == 0)
         {
-          if (argc > 2 && (strcmp(argv[2], "hk") == 0 || strcmp(argv[2], "hk1") == 0 || strcmp(argv[2], "hk2") == 0))
-            {
-              return clean_one_partition("/dev/hk", "/mnt/hk");
-            }
-          else if (argc > 2 && (strcmp(argv[2], "camera") == 0 || strcmp(argv[2], "cam") == 0))
-            {
-              return clean_one_partition("/dev/camera", "/mnt/camera");
-            }
-          else
-            {
-              printf("[LITTLEFS] Cleaning all partitions (HK, Camera)...\n");
-              clean_one_partition("/dev/hk", "/mnt/hk");
-              clean_one_partition("/dev/camera", "/mnt/camera");
-              return 0;
-            }
+          return apply_partition_op((argc > 2) ? argv[2] : "all",
+                                    clean_one_partition, "Cleaning");
         }
       else if (strcmp(argv[1], "format") == 0)
         {
-          if (argc > 2 && (strcmp(argv[2], "hk") == 0 || strcmp(argv[2], "hk1") == 0 || strcmp(argv[2], "hk2") == 0))
-            {
-              return format_one_partition("/dev/hk", "/mnt/hk");
-            }
-          else if (argc > 2 && (strcmp(argv[2], "camera") == 0 || strcmp(argv[2], "cam") == 0))
-            {
-              return format_one_partition("/dev/camera", "/mnt/camera");
-            }
-          else
-            {
-              printf("[LITTLEFS] Formatting all partitions (HK, Camera)...\n");
-              format_one_partition("/dev/hk", "/mnt/hk");
-              format_one_partition("/dev/camera", "/mnt/camera");
-              return 0;
-            }
+          return apply_partition_op((argc > 2) ? argv[2] : "all",
+                                    format_one_partition, "Formatting");
         }
       else if (strcmp(argv[1], "size") == 0 || strcmp(argv[1], "partition") == 0 ||
                strcmp(argv[1], "part") == 0 || strcmp(argv[1], "info") == 0)
@@ -1508,13 +1364,23 @@ int littlefs_main(int argc, FAR char *argv[])
           printf("\nUsage: littlefs [command] [target]\n");
           printf("Commands:\n");
           printf("  read   [hk | hk1 | hk2]       - Dump stored telemetry records\n");
-          printf("  clean  [hk | camera]          - Delete files, keep format\n");
-          printf("  format [hk | camera]          - Force-reformat LittleFS partition\n");
-          printf("  erase  [hk | camera | 4kb | 32kb | 64kb | die | all] - Flash erase\n");
+          printf("  clean  [target | all]         - Delete files, keep format\n");
+          printf("  format [target | all]         - Force-reformat LittleFS partition(s)\n");
+          printf("  erase  [target | 4kb | 32kb | 64kb | die | all] - Flash erase\n");
           printf("  size   [or partition/info]    - Display partition table & file sizes\n");
           printf("  test                          - Run low-level SPI NOR self-test\n");
-          printf("  (no args)                     - Run telemetry storage daemon\n\n");
+          printf("  (no args)                     - Run telemetry storage daemon\n");
+          printf("Targets:\n");
+          printf("  all, hk (hk1+hk2), hk1, hk2, adcs, camera (cam_rgb+cam_nir),\n");
+          printf("  cam_rgb (rgb), cam_nir (nir), epdm, dpm, rsv_table (rsv),\n");
+          printf("  imp_flags (flags), part_size (size), seek_ptr (seek)\n\n");
           return 0;
+        }
+      else
+        {
+          printf("[LITTLEFS] Unknown command: '%s'. Run 'littlefs help' for usage.\n",
+                 argv[1]);
+          return -EINVAL;
         }
     }
 

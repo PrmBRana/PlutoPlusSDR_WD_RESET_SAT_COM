@@ -40,25 +40,10 @@ else
 include tools/Unix.mk
 endif
 
-SAT_M0_DIR ?= ../JC1/cpu2
-
 # Flash Satellite Cortex-M4 (NuttX) only (0x08000000)
-flash_cpu1 flash_m4 flash_M4 flash_CPU1: flash
+flash_M4: flash
 
-# Flash JC1 Satellite Cortex-M0+ from JC1/cpu2 (0x08032000)
-flash_sat flash_SAT flash_cpu2_sat flashsatM0 flash_satM0 flash_m0 flash_M0 flash_cpu2 flash_CPU2:
-	$(MAKE) -C $(SAT_M0_DIR) flash
-
-build_sat_m0:
-	$(MAKE) -C $(SAT_M0_DIR) all
-
-clean_sat_m0:
-	$(MAKE) -C $(SAT_M0_DIR) clean
-
-# Flash both Satellite cores sequentially (M4 first at 0x08000000, then M0+ at 0x08032000)
-flash_all_sat: flash_cpu1 flash_sat
-
-.PHONY: flash_cpu1 flash_m4 flash_M4 flash_CPU1 flash_sat flash_SAT flash_cpu2_sat flashsatM0 flash_satM0 flash_m0 flash_M0 flash_cpu2 flash_CPU2 build_sat_m0 clean_sat_m0 flash_all_sat
+.PHONY: flash_M4
 
 endif
 
