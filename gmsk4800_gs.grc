@@ -1,0 +1,797 @@
+options:
+  parameters:
+    author: ''
+    catch_exceptions: 'True'
+    category: '[GRC Hier Blocks]'
+    cmake_opt: ''
+    comment: ''
+    copyright: ''
+    description: GMSK 4800 bps Ground Station for Pluto+ SDR (TX 435.313 MHz, RX 437.375
+      MHz)
+    gen_cmake: 'On'
+    gen_linking: dynamic
+    generate_options: qt_gui
+    hier_block_src_path: '.:'
+    id: gmsk4800_gs
+    max_nouts: '0'
+    output_language: python
+    placement: (0,0)
+    qt_qss_theme: ''
+    realtime_scheduling: ''
+    run: 'True'
+    run_command: '{python} -u {filename}'
+    run_options: prompt
+    sizing_mode: fixed
+    thread_safe_setters: ''
+    title: GMSK 4800 Pluto+ Ground Station
+    window_size: (1920,1080)
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 8]
+    rotation: 0
+    state: enabled
+
+blocks:
+- name: baseband_rate
+  id: variable
+  parameters:
+    comment: Baseband DSP rate (48 kS/s)
+    value: baud_rate * sps
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 172.0]
+    rotation: 0
+    state: enabled
+- name: baud_rate
+  id: variable
+  parameters:
+    comment: ''
+    value: '4800'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 100.0]
+    rotation: 0
+    state: enabled
+- name: doppler_rx_hz
+  id: variable
+  parameters:
+    comment: Digital RX Doppler offset (Hz) via XML-RPC
+    value: '0.0'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [144, 244.0]
+    rotation: 0
+    state: enabled
+- name: doppler_tx_hz
+  id: variable
+  parameters:
+    comment: Digital TX Doppler offset (Hz) via XML-RPC
+    value: '0.0'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [144, 388.0]
+    rotation: 0
+    state: enabled
+- name: resamp_factor
+  id: variable
+  parameters:
+    comment: Upsample/downsample factor (48k <-> 960k)
+    value: '20'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [144, 172.0]
+    rotation: 0
+    state: enabled
+- name: rx_freq
+  id: variable
+  parameters:
+    comment: GS RX Downlink (matches Mission/config.h)
+    value: 437.375e6
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [136, 316.0]
+    rotation: 0
+    state: enabled
+- name: rx_gain
+  id: variable_qtgui_range
+  parameters:
+    comment: Keep signal peak between -15 and -25 dBFS (avoid >0 dBFS clipping)
+    gui_hint: ''
+    label: RX Gain (dB)
+    min_len: '200'
+    orient: QtCore.Qt.Horizontal
+    rangeType: float
+    start: '0'
+    step: '1'
+    stop: '71'
+    value: '15'
+    widget: counter_slider
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 388.0]
+    rotation: 0
+    state: enabled
+- name: samp_rate
+  id: variable
+  parameters:
+    comment: Pluto+ hardware rate (960 kS/s >= 521 kS/s min)
+    value: baseband_rate * resamp_factor
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 244.0]
+    rotation: 0
+    state: enabled
+- name: sps
+  id: variable
+  parameters:
+    comment: Samples per symbol
+    value: '10'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [112, 100.0]
+    rotation: 0
+    state: enabled
+- name: tx_freq
+  id: variable
+  parameters:
+    comment: GS TX Uplink (matches Mission/config.h)
+    value: 435.313e6
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 316.0]
+    rotation: 0
+    state: enabled
+- name: blocks_complex_to_mag_squared_0
+  id: blocks_complex_to_mag_squared
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: CW Envelope Power
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [536, 516.0]
+    rotation: 0
+    state: enabled
+- name: blocks_float_to_char_0
+  id: blocks_float_to_char
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: Signed dBFS byte (-128..0)
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    scale: '1'
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1200, 516.0]
+    rotation: 0
+    state: enabled
+- name: blocks_keep_one_in_n_0
+  id: blocks_keep_one_in_n
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: 200 Hz RSSI rate (5 ms/sample)
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    n: '240'
+    type: float
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [920, 516.0]
+    rotation: 0
+    state: enabled
+- name: blocks_moving_average_xx_0
+  id: blocks_moving_average_xx
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: 5 ms average (240 samples @ 48 kS/s)
+    length: '240'
+    max_iter: '4000'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    scale: 1.0/240.0
+    type: float
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [728, 492.0]
+    rotation: 0
+    state: enabled
+- name: blocks_multiply_const_vxx_0
+  id: blocks_multiply_const_vxx
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: Near full-scale GMSK TX amplitude
+    const: '0.9'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    type: complex
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1168, 68.0]
+    rotation: 0
+    state: enabled
+- name: blocks_nlog10_ff_0
+  id: blocks_nlog10_ff
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: Convert power to dBFS
+    k: '0'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    n: '10'
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1072, 516.0]
+    rotation: 0
+    state: enabled
+- name: blocks_pack_k_bits_bb_0
+  id: blocks_pack_k_bits_bb
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    k: '8'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1168, 260.0]
+    rotation: 0
+    state: enabled
+- name: blocks_rotator_cc_0
+  id: blocks_rotator_cc
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: Digital TX Doppler shift (glitch-free)
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    phase_inc: 2.0 * 3.141592653589793 * doppler_tx_hz / samp_rate
+    tag_inc_update: 'False'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1152, 132.0]
+    rotation: 0
+    state: enabled
+- name: blocks_stream_to_tagged_stream_0
+  id: blocks_stream_to_tagged_stream
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    len_tag_key: '"packet_len"'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    packet_len: '64'
+    type: byte
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1160, 372.0]
+    rotation: 0
+    state: enabled
+- name: blocks_stream_to_tagged_stream_cw
+  id: blocks_stream_to_tagged_stream
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: 10 samples = 50 ms batch
+    len_tag_key: '"packet_len"'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    packet_len: '10'
+    type: byte
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1352, 508.0]
+    rotation: 0
+    state: enabled
+- name: dc_blocker_xx_0
+  id: dc_blocker_xx
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: Auto-removes Pluto/Sat crystal freq offset (25 symbols)
+    length: '256'
+    long_form: 'True'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    type: ff
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [960, 348.0]
+    rotation: 0
+    state: enabled
+- name: digital_binary_slicer_fb_0
+  id: digital_binary_slicer_fb
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1696, 240.0]
+    rotation: 0
+    state: enabled
+- name: digital_gfsk_demod_0
+  id: analog_quadrature_demod_cf
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: FM demod (fdev=1200 Hz @ 48 kS/s)
+    gain: baseband_rate/(2*3.14159265*1200)
+    maxoutbuf: '0'
+    minoutbuf: '0'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [768, 356.0]
+    rotation: 0
+    state: enabled
+- name: digital_gfsk_mod_0
+  id: digital_gfsk_mod
+  parameters:
+    affinity: ''
+    alias: ''
+    bt: '0.5'
+    comment: GMSK h=0.5, fdev=1200 Hz @ 48 kS/s
+    do_unpack: 'True'
+    log: 'False'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    samples_per_symbol: sps
+    sensitivity: '0.15708'
+    verbose: 'False'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [744, 52.0]
+    rotation: 0
+    state: enabled
+- name: digital_symbol_sync_xx_0
+  id: digital_symbol_sync_xx
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: GMSK 4800 bps Symbol Clock Recovery
+    constellation: digital.constellation_bpsk().base()
+    damping: '1.0'
+    loop_bw: '0.025'
+    max_dev: '0.02'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    nfilters: '128'
+    osps: '1'
+    pfb_mf_taps: '[]'
+    resamp_type: digital.IR_MMSE_8TAP
+    sps: sps
+    ted_gain: '1.0'
+    ted_type: digital.TED_ZERO_CROSSING
+    type: ff
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1384, 276.0]
+    rotation: 0
+    state: enabled
+- name: iio_pluto_sink_0
+  id: iio_pluto_sink
+  parameters:
+    affinity: ''
+    alias: ''
+    attenuation1: '0.0'
+    bandwidth: '200000'
+    buffer_size: '4096'
+    comment: ''
+    cyclic: 'False'
+    filter: ''
+    filter_source: '''Auto'''
+    fpass: '0'
+    frequency: int(tx_freq)
+    fstop: '0'
+    len_tag_key: ''
+    samplerate: int(samp_rate)
+    type: fc32
+    uri: '"ip:192.168.2.1"'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1352, 20.0]
+    rotation: 0
+    state: enabled
+- name: iio_pluto_source_0
+  id: iio_pluto_source
+  parameters:
+    affinity: ''
+    alias: ''
+    bandwidth: '200000'
+    bbdc: 'True'
+    buffer_size: '32768'
+    comment: ''
+    filter: ''
+    filter_source: '''Auto'''
+    fpass: '0'
+    frequency: int(rx_freq)
+    fstop: '0'
+    gain1: '''manual'''
+    len_tag_key: ''
+    manual_gain1: rx_gain
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    quadrature: 'True'
+    rfdc: 'True'
+    samplerate: int(samp_rate)
+    type: fc32
+    uri: '"ip:192.168.2.1"'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [280, 268.0]
+    rotation: 0
+    state: enabled
+- name: low_pass_filter_0
+  id: freq_xlating_fir_filter_xxx
+  parameters:
+    affinity: ''
+    alias: ''
+    center_freq: doppler_rx_hz
+    comment: Digital RX Doppler shift + Decimate 960k -> 48k (20 kHz BW)
+    decim: resamp_factor
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    samp_rate: samp_rate
+    taps: firdes.low_pass(1, samp_rate, 10000, 4000)
+    type: ccc
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [536, 300.0]
+    rotation: 0
+    state: enabled
+- name: low_pass_filter_bb
+  id: low_pass_filter
+  parameters:
+    affinity: ''
+    alias: ''
+    beta: '6.76'
+    comment: Baseband matched LPF for 4800 bps GMSK
+    cutoff_freq: '3600'
+    decim: '1'
+    gain: '1'
+    interp: '1'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    samp_rate: baseband_rate
+    type: fir_filter_fff
+    width: '1200'
+    win: window.WIN_HAMMING
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1128, 308.0]
+    rotation: 0
+    state: enabled
+- name: network_socket_pdu_cw
+  id: network_socket_pdu
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: CW RSSI output to OpenBirdsOperation (TCP :8003)
+    host: 127.0.0.1
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    mtu: '1024'
+    port: '8003'
+    tcp_no_delay: 'True'
+    type: TCP_SERVER
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1840, 548.0]
+    rotation: 0
+    state: enabled
+- name: network_socket_pdu_rx
+  id: network_socket_pdu
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: RX bitstream output to GS Bridge (TCP :8002)
+    host: 127.0.0.1
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    mtu: '1024'
+    port: '8002'
+    tcp_no_delay: 'False'
+    type: TCP_SERVER
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1752, 380.0]
+    rotation: 0
+    state: enabled
+- name: network_socket_pdu_tx
+  id: network_socket_pdu
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: TX packet input from GS Bridge (TCP :8001)
+    host: 127.0.0.1
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    mtu: '1024'
+    port: '8001'
+    tcp_no_delay: 'False'
+    type: TCP_SERVER
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [280, 44.0]
+    rotation: 0
+    state: enabled
+- name: pdu_pdu_to_tagged_stream_0
+  id: pdu_pdu_to_tagged_stream
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    tag: packet_len
+    type: byte
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [504, 68.0]
+    rotation: 0
+    state: enabled
+- name: pdu_tagged_stream_to_pdu_0
+  id: pdu_tagged_stream_to_pdu
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    tag: packet_len
+    type: byte
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1424, 452.0]
+    rotation: 0
+    state: enabled
+- name: pdu_tagged_stream_to_pdu_cw
+  id: pdu_tagged_stream_to_pdu
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    tag: packet_len
+    type: byte
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1584, 516.0]
+    rotation: 0
+    state: enabled
+- name: qtgui_freq_sink_x_0
+  id: qtgui_freq_sink_x
+  parameters:
+    affinity: ''
+    alias: ''
+    alpha1: '1.0'
+    alpha10: '1.0'
+    alpha2: '1.0'
+    alpha3: '1.0'
+    alpha4: '1.0'
+    alpha5: '1.0'
+    alpha6: '1.0'
+    alpha7: '1.0'
+    alpha8: '1.0'
+    alpha9: '1.0'
+    autoscale: 'False'
+    average: '0.2'
+    axislabels: 'True'
+    bw: baseband_rate
+    color1: '"blue"'
+    color10: '"dark blue"'
+    color2: '"red"'
+    color3: '"green"'
+    color4: '"black"'
+    color5: '"cyan"'
+    color6: '"magenta"'
+    color7: '"yellow"'
+    color8: '"dark red"'
+    color9: '"dark green"'
+    comment: Downlink Spectrum Monitor
+    ctrlpanel: 'False'
+    fc: rx_freq + doppler_rx_hz
+    fftsize: '1024'
+    freqhalf: 'True'
+    grid: 'True'
+    gui_hint: ''
+    label: Relative Gain
+    label1: Downlink RX
+    label10: ''''''
+    label2: ''''''
+    label3: ''''''
+    label4: ''''''
+    label5: ''''''
+    label6: ''''''
+    label7: ''''''
+    label8: ''''''
+    label9: ''''''
+    legend: 'True'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    name: '"Downlink RX Spectrum (48 kHz Baseband)"'
+    nconnections: '1'
+    norm_window: 'False'
+    showports: 'False'
+    tr_chan: '0'
+    tr_level: '0.0'
+    tr_mode: qtgui.TRIG_MODE_FREE
+    tr_tag: '""'
+    type: complex
+    units: dB
+    update_time: '0.10'
+    width1: '1'
+    width10: '1'
+    width2: '1'
+    width3: '1'
+    width4: '1'
+    width5: '1'
+    width6: '1'
+    width7: '1'
+    width8: '1'
+    width9: '1'
+    wintype: window.WIN_BLACKMAN_hARRIS
+    ymax: '10'
+    ymin: '-120'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [768, 204.0]
+    rotation: 0
+    state: enabled
+- name: rational_resampler_xxx_0
+  id: rational_resampler_xxx
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: Upsample 48 kS/s -> 960 kS/s with gain=20 (fixes -26 dB zero-stuffing loss)
+    decim: '1'
+    fbw: '0'
+    interp: resamp_factor
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    taps: firdes.low_pass(resamp_factor, samp_rate, 12000, 8000)
+    type: ccc
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [960, 44.0]
+    rotation: 0
+    state: enabled
+- name: xmlrpc_server_0
+  id: xmlrpc_server
+  parameters:
+    addr: 127.0.0.1
+    alias: ''
+    comment: Receives live Doppler updates from OpenBirdsOperation / Gpredict
+    port: '8080'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 508.0]
+    rotation: 0
+    state: enabled
+
+connections:
+- [blocks_complex_to_mag_squared_0, '0', blocks_moving_average_xx_0, '0']
+- [blocks_float_to_char_0, '0', blocks_stream_to_tagged_stream_cw, '0']
+- [blocks_keep_one_in_n_0, '0', blocks_nlog10_ff_0, '0']
+- [blocks_moving_average_xx_0, '0', blocks_keep_one_in_n_0, '0']
+- [blocks_multiply_const_vxx_0, '0', iio_pluto_sink_0, '0']
+- [blocks_nlog10_ff_0, '0', blocks_float_to_char_0, '0']
+- [blocks_pack_k_bits_bb_0, '0', blocks_stream_to_tagged_stream_0, '0']
+- [blocks_rotator_cc_0, '0', blocks_multiply_const_vxx_0, '0']
+- [blocks_stream_to_tagged_stream_0, '0', pdu_tagged_stream_to_pdu_0, '0']
+- [blocks_stream_to_tagged_stream_cw, '0', pdu_tagged_stream_to_pdu_cw, '0']
+- [dc_blocker_xx_0, '0', low_pass_filter_bb, '0']
+- [digital_binary_slicer_fb_0, '0', blocks_pack_k_bits_bb_0, '0']
+- [digital_gfsk_demod_0, '0', dc_blocker_xx_0, '0']
+- [digital_gfsk_mod_0, '0', rational_resampler_xxx_0, '0']
+- [digital_symbol_sync_xx_0, '0', digital_binary_slicer_fb_0, '0']
+- [iio_pluto_source_0, '0', low_pass_filter_0, '0']
+- [low_pass_filter_0, '0', blocks_complex_to_mag_squared_0, '0']
+- [low_pass_filter_0, '0', digital_gfsk_demod_0, '0']
+- [low_pass_filter_0, '0', qtgui_freq_sink_x_0, '0']
+- [low_pass_filter_bb, '0', digital_symbol_sync_xx_0, '0']
+- [network_socket_pdu_tx, pdus, pdu_pdu_to_tagged_stream_0, pdus]
+- [pdu_pdu_to_tagged_stream_0, '0', digital_gfsk_mod_0, '0']
+- [pdu_tagged_stream_to_pdu_0, pdus, network_socket_pdu_rx, pdus]
+- [pdu_tagged_stream_to_pdu_cw, pdus, network_socket_pdu_cw, pdus]
+- [rational_resampler_xxx_0, '0', blocks_rotator_cc_0, '0']
+
+metadata:
+  file_format: 1

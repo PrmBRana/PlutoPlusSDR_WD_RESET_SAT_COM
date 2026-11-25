@@ -1394,8 +1394,8 @@ void Satellite_Send_HK_Combined_Packet(const int16_t b1[5], const int16_t b2[5])
     adc2[7]  = (int16_t)15;                          /* SP4 Current */
     adc2[8]  = (int16_t)15;                          /* SP5 Current */
     adc2[9]  = (int16_t)85;                          /* Raw Bus Current */
-    adc2[10] = (b2[3] != 0) ? b2[3] : (int16_t)1;   /* Status Flag 1 */
-    adc2[11] = (b2[4] != 0) ? b2[4] : (int16_t)0;   /* Status Flag 2 */
+    adc2[10] = b2[3];                                /* Status Flag 1 (Satellite Lifetime Days) */
+    adc2[11] = (b2[4] != 0) ? b2[4] : (int16_t)2;    /* Status Flag 2 */
 
     /* --- IMU: 6 Channels (Gyro & Mag, Bytes 58..69) --- */
     int16_t *imu = (int16_t *)&pkt[58];

@@ -206,8 +206,33 @@ static int stm32wl5_mt25q_initialize(void)
 
 #endif
 
+static inline void stm32wl5_ext_wdt_kick(void)
+{
+  /* Atomic toggle on PB8 (external 1.6 s watchdog WDI) via BSRR */
+
+  uint32_t odr = getreg32(0x48000414UL); /* GPIOB_ODR */
+  putreg32((odr & (1UL << 8)) ? (1UL << (8 + 16)) : (1UL << 8), 0x48000418UL);
+}
+
 void stm32wl5_board_initialize(void)
 {
+  /* External 1.6 s Watchdog WDI (PB8): push-pull output, kick immediately
+   * from bootup (edge-triggered: must toggle faster than 1.6 s).
+   * Global Reset pin PA11: drive LOW (idle) at bootup; pulsed HIGH every 24h.
+   */
+
+  modifyreg32(0x5800004c, 0, (1UL << 0) | (1UL << 1)); /* RCC_AHB2ENR: GPIOA, GPIOB */
+  modifyreg32(0x5800014c, 0, (1UL << 0) | (1UL << 1)); /* RCC_C2AHB2ENR: GPIOA, GPIOB */
+
+  stm32wl5_configgpio(GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_2MHz |
+                      GPIO_OUTPUT_SET | GPIO_PORTB | GPIO_PIN8);
+  stm32wl5_ext_wdt_kick();
+
+  stm32wl5_configgpio(GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_2MHz |
+                      GPIO_OUTPUT_CLEAR | GPIO_PORTA | GPIO_PIN11);
+  stm32wl5_gpiowrite(GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_2MHz |
+                     GPIO_OUTPUT_CLEAR | GPIO_PORTA | GPIO_PIN11, false);
+
   /* Configure on-board LEDs, which are always enabled */
 
   board_leds_initialize();
@@ -460,7 +485,9 @@ void board_late_initialize(void)
 #if defined(CONFIG_MTD_M25P)
   /* Initialize external MT25Q NOR flash and partitions */
 
+  stm32wl5_ext_wdt_kick();
   ret = stm32wl5_mt25q_initialize();
+  stm32wl5_ext_wdt_kick();
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: stm32wl5_mt25q_initialize() failed: %d\n", ret);
@@ -499,6 +526,7 @@ void board_late_initialize(void)
   bool boot_hs_ok = false;
   while (boot_hs_retries-- > 0)
     {
+      stm32wl5_ext_wdt_kick();
       putreg32((1 << 16), 0x58000C08);   /* IPCC_C1SCR: Set channel 1 TX flag to M0+ */
       up_mdelay(10);
       if ((getreg32(0x58000C1C) & (1 << 0)) != 0) /* IPCC_C2TOC1SR: Check if M0+ answered */

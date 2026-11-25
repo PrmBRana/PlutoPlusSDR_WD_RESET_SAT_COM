@@ -29,7 +29,10 @@
 
 MEMORY
 {
-  flash (rx) : ORIGIN = 0x08000000, LENGTH = 200K
+  /* Reserve Page 99 (0x08031800..0x08031FFF, 2 KB) for internal WL55
+   * satellite lifetime & status flags (strictly below CPU2 at 0x08032000).
+   */
+  flash (rx) : ORIGIN = 0x08000000, LENGTH = 198K
   sram (rwx) : ORIGIN = 0x20000000, LENGTH = 32K
 }
 

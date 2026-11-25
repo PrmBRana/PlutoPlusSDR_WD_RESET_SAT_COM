@@ -69,6 +69,8 @@ namespace OpenBirdsOperation
         private SerialPort RotatorPort = new SerialPort();
 
         private bool TncPortConnected = false;
+        private PlutoSdrLink plutoSdrLink = null;
+        private bool plutoSdrConnected = false;
         private bool RadioPortConnected = false;
         private bool RotatorPortConnected = false;
         private bool ReceivedDataKissFrameFlag = false;
@@ -481,6 +483,7 @@ namespace OpenBirdsOperation
                     ports.Add(p);
                 }
             }
+            TncPortComboBox.Items.Add(PlutoSdrLink.DisplayPortName);
             foreach (string port in ports)
             {
                 TncPortComboBox.Items.Add(port);
@@ -688,12 +691,21 @@ namespace OpenBirdsOperation
             {
                 if (!TncPortConnected && TncPortComboBox.Items.Count > 0)
                 {
-                    string firstPort = TncPortComboBox.Items[0].ToString();
-                    if (firstPort.IndexOf("ttyUSB", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        firstPort.IndexOf("ttyACM", StringComparison.OrdinalIgnoreCase) >= 0)
+                    bool autoConnected = false;
+                    for (int idx = 0; idx < TncPortComboBox.Items.Count; idx++)
                     {
-                        TncPortComboBox.SelectedIndex = 0;
-                        TncConnectButton_Click(this, EventArgs.Empty);
+                        string portName = TncPortComboBox.Items[idx].ToString();
+                        if (portName.IndexOf("ttyUSB", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            TncPortComboBox.SelectedIndex = idx;
+                            TncConnectButton_Click(this, EventArgs.Empty);
+                            autoConnected = true;
+                            break;
+                        }
+                    }
+                    if (!autoConnected)
+                    {
+                        TncPortComboBox.SelectedIndex = 0; // Default to Pluto+ SDR (GNU Radio)
                     }
                 }
             }
@@ -781,33 +793,7 @@ namespace OpenBirdsOperation
             if (TncPortConnected)
             {
                 string cleanHex = Sending_command.Trim().ToUpper();
-                string uplinkCommand;
-
-                // Match gs_communicator.py & gs_app.c built-in command handlers
-                // DC    (53 04 CC 5E BE ...): Dummy Camera Capture ('MSN'+'CAM' -> ADCS -> Flash CAM partition, NO immediate downlink)
-                // CAMON (53 04 CC 5E BC ...): Real Camera Capture  ('MSN'+0xCA  -> ADCS -> Flash CAM partition, NO immediate downlink)
-                // CAM   (53 04 CC 5E BD ...): Unified Camera Data Downlink (streams stored Real or Dummy image from Flash CAM partition)
-                if (cleanHex == "53 04 CC 5E BE 00 D0 00 00 00 00 00 45")
-                {
-                    uplinkCommand = "DC";
-                }
-                else if (cleanHex.StartsWith("53 04 CC 5E BC "))
-                {
-                    uplinkCommand = "CAMON";
-                }
-                else if (cleanHex == "53 01 1D D1 F2 00 F2 00 00 00 00 00 01")
-                {
-                    uplinkCommand = "HK1";
-                }
-                else if (cleanHex == "53 01 1D D2 F2 00 F2 00 00 00 00 00 01")
-                {
-                    uplinkCommand = "HK2";
-                }
-                else if (cleanHex == "53 01 1D D1 F5 00 00 00 00 00 00 00 01")
-                {
-                    uplinkCommand = "PING";
-                }
-                else
+                if (plutoSdrConnected && plutoSdrLink != null && plutoSdrLink.IsConnected)
                 {
                     if (cleanHex.StartsWith("53 04 CC 5E BD") ||
                         cleanHex.StartsWith("53 01 1D D2 F5") ||
@@ -815,10 +801,56 @@ namespace OpenBirdsOperation
                     {
                         camHistoryLines.Clear();
                     }
-                    uplinkCommand = cleanHex.StartsWith("HEX ") ? cleanHex : "HEX " + cleanHex;
+                    string hexPayloadStr = cleanHex.StartsWith("HEX ") ? cleanHex.Substring(4).Trim() : cleanHex;
+                    string[] hexTokens = hexPayloadStr.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    byte[] payloadBytes = new byte[hexTokens.Length];
+                    for (int hi = 0; hi < hexTokens.Length; hi++)
+                    {
+                        payloadBytes[hi] = Convert.ToByte(hexTokens[hi], 16);
+                    }
+                    plutoSdrLink.TransmitPayload(payloadBytes, cleanHex);
                 }
+                else
+                {
+                    string uplinkCommand;
 
-                TncPort.WriteLine(uplinkCommand);
+                    // Match gs_communicator.py & gs_app.c built-in command handlers
+                    // DC    (53 04 CC 5E BE ...): Dummy Camera Capture ('MSN'+'CAM' -> ADCS -> Flash CAM partition, NO immediate downlink)
+                    // CAMON (53 04 CC 5E BC ...): Real Camera Capture  ('MSN'+0xCA  -> ADCS -> Flash CAM partition, NO immediate downlink)
+                    // CAM   (53 04 CC 5E BD ...): Unified Camera Data Downlink (streams stored Real or Dummy image from Flash CAM partition)
+                    if (cleanHex == "53 04 CC 5E BE 00 D0 00 00 00 00 00 45")
+                    {
+                        uplinkCommand = "DC";
+                    }
+                    else if (cleanHex.StartsWith("53 04 CC 5E BC "))
+                    {
+                        uplinkCommand = "CAMON";
+                    }
+                    else if (cleanHex == "53 01 1D D1 F2 00 F2 00 00 00 00 00 01")
+                    {
+                        uplinkCommand = "HK1";
+                    }
+                    else if (cleanHex == "53 01 1D D2 F2 00 F2 00 00 00 00 00 01")
+                    {
+                        uplinkCommand = "HK2";
+                    }
+                    else if (cleanHex == "53 01 1D D1 F5 00 00 00 00 00 00 00 01")
+                    {
+                        uplinkCommand = "PING";
+                    }
+                    else
+                    {
+                        if (cleanHex.StartsWith("53 04 CC 5E BD") ||
+                            cleanHex.StartsWith("53 01 1D D2 F5") ||
+                            cleanHex.StartsWith("53 01 1D D2 F6"))
+                        {
+                            camHistoryLines.Clear();
+                        }
+                        uplinkCommand = cleanHex.StartsWith("HEX ") ? cleanHex : "HEX " + cleanHex;
+                    }
+
+                    TncPort.WriteLine(uplinkCommand);
+                }
             }
 
             await Task.Delay(750);
@@ -1017,6 +1049,10 @@ namespace OpenBirdsOperation
                             correctedFreqency = (int)((dlFreq + freqAddjustValue));
                         }
                     }
+                    if (plutoSdrConnected && plutoSdrLink != null && plutoSdrLink.IsConnected)
+                    {
+                        plutoSdrLink.SetDopplerOffsets(-freqAddjustValue, freqAddjustValue);
+                    }
                     this.Invoke(UTVD, correctedFreqency, azHomeValue, elHomeValue);
                     return;
                 }
@@ -1062,6 +1098,13 @@ namespace OpenBirdsOperation
                     }
                 }
 
+                if (plutoSdrConnected && plutoSdrLink != null && plutoSdrLink.IsConnected)
+                {
+                    double rxDopplerHz = (dlFreq + freqAddjustValue) * (-rangingSpeed / speedOfLight) + freqAddjustValue;
+                    double txDopplerHz = ulFreq * (rangingSpeed / speedOfLight) - freqAddjustValue;
+                    plutoSdrLink.SetDopplerOffsets(txDopplerHz, rxDopplerHz);
+                }
+
                 this.Invoke(UTVD, correctedFreqency, spherical.y, spherical.z);
             }
             catch { }
@@ -1105,6 +1148,31 @@ namespace OpenBirdsOperation
             {
                 if (!TncPortConnected)
                 {
+                    if (TncPortComboBox.Text == PlutoSdrLink.DisplayPortName)
+                    {
+                        plutoSdrLink = new PlutoSdrLink("127.0.0.1", 8001, 8002);
+                        plutoSdrLink.OnTextReceived += (msg) =>
+                        {
+                            try
+                            {
+                                ProcessSerialBytes(Encoding.ASCII.GetBytes(msg));
+                            }
+                            catch { }
+                        };
+                        plutoSdrLink.Connect();
+                        plutoSdrConnected = true;
+                        TncPortConnected = true;
+                        TransmitButton.Enabled = true;
+                        TncPortComboBox.Enabled = false;
+                        TncBaudComboBox.Enabled = false;
+                        TncConnectButton.Text = "DisConnect";
+
+                        FmdRadioButton.Checked = true;
+                        FmdRadioButton.Enabled = true; // Telemetry
+                        CwRadioButton.Enabled = true;  // Digipeater
+                        return;
+                    }
+
                     int baud = 115200;
                     string baudStr = TncBaudComboBox.SelectedItem != null ? TncBaudComboBox.SelectedItem.ToString() : TncBaudComboBox.Text;
                     if (!int.TryParse(baudStr, out baud) || baud <= 0)
@@ -1152,7 +1220,19 @@ namespace OpenBirdsOperation
                 }
                 else
                 {
-                    TncPort.Close();
+                    if (plutoSdrConnected)
+                    {
+                        if (plutoSdrLink != null)
+                        {
+                            plutoSdrLink.Disconnect();
+                            plutoSdrLink = null;
+                        }
+                        plutoSdrConnected = false;
+                    }
+                    else
+                    {
+                        TncPort.Close();
+                    }
                     TncPortConnected = false;
                     TransmitButton.Enabled = false;
                     TncPortComboBox.Enabled = true;
@@ -1300,7 +1380,7 @@ namespace OpenBirdsOperation
 
         private void SerialPollTimer_Tick(object sender, EventArgs e)
         {
-            if (!TncPortConnected || TncPort == null || !TncPort.IsOpen || isPollingSerial)
+            if (plutoSdrConnected || !TncPortConnected || TncPort == null || !TncPort.IsOpen || isPollingSerial)
             {
                 return;
             }
@@ -1983,6 +2063,7 @@ namespace OpenBirdsOperation
                 TncPortComboBox.Items.Clear();
                 RadioPortComboBox.Items.Clear();
                 RotatorPortComboBox.Items.Clear();
+                TncPortComboBox.Items.Add(PlutoSdrLink.DisplayPortName);
                 foreach (string port in ports)
                 {
                     TncPortComboBox.Items.Add(port);

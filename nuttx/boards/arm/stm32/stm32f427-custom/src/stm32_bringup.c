@@ -32,6 +32,7 @@
 #include <errno.h>
 
 #include <nuttx/board.h>
+#include <arch/board/board.h>
 #include <nuttx/fs/fs.h>
 #include <nuttx/kmalloc.h>
 
@@ -126,6 +127,11 @@ int stm32_bringup(void)
       return ret;
     }
 #endif
+
+  /* Power on OpenMV H7 RGB & NIR cameras (PB4 HIGH, matching bare-metal) */
+
+  stm32_configgpio(GPIO_CAM_ENABLE);
+  stm32_gpiowrite(GPIO_CAM_ENABLE, true);
 
   /* Configure SPI-based devices */
 

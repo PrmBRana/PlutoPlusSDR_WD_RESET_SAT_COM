@@ -117,6 +117,53 @@ FAR struct spi_dev_s *stm32wl5_spibus_initialize(int bus);
 #define SOLAR_I_THRESHOLD   0.015f
 #define IDLE_I_THRESHOLD    0.010f
 
+/* ============================================================================
+ * Watchdog (PB8 always HIGH), 24h Global Reset (PA11), & Satellite Lifetime
+ * Flags (dual-stored in Internal WL55 Flash Page 99 + Micron /mnt/imp_flags)
+ * ============================================================================ */
+
+#define GLOBAL_RESET_INTERVAL_SEC   86400UL   /* 24 hours */
+#define GLOBAL_RESET_GRACE_SEC      60UL      /* max wait if RF TX/CAM busy */
+#define GLOBAL_RESET_PULSE_US       500000U   /* 500 ms PA11 HIGH pulse */
+
+/* Internal STM32WL55 Flash Page 99 (0x08031800..0x08031FFF, 2 KB)
+ * Protected by wl55jc.ld (CPU1 = 198K) and below CPU2 (0x08032000). */
+#define WL55_INT_FLAGS_PAGE         99UL
+#define WL55_INT_FLAGS_ADDR         0x08031800UL
+#define WL55_INT_FLAGS_PAGE_SIZE    2048UL
+
+#define IMP_FLAGS_DEV               "/dev/imp_flags"
+#define IMP_FLAGS_MNT               "/mnt/imp_flags"
+#define IMP_FLAGS_FILE              "/mnt/imp_flags/flags.bin"
+
+#define SAT_FLAGS_MAGIC             0x53415446UL  /* "SATF" */
+#define SAT_FLAGS_VERSION           1UL
+
+/* Status flag bits stored in sat_lifetime_flags_s.status_flags */
+#define SAT_STATUS_BOOT_OK          (1UL << 0)  /* Boot initialization OK */
+#define SAT_STATUS_WDT_PB8_HIGH     (1UL << 1)  /* Watchdog PB8 kept HIGH */
+#define SAT_STATUS_GLOBAL_RST_24H   (1UL << 2)  /* 24h PA11 global reset triggered */
+#define SAT_STATUS_INT_FLASH_OK     (1UL << 3)  /* Internal WL55 flash synced */
+#define SAT_STATUS_EXT_FLASH_OK     (1UL << 4)  /* External Micron imp_flags synced */
+
+/* 32 bytes (4 x 64-bit double-words for STM32WL55 internal flash) */
+struct sat_lifetime_flags_s
+{
+  uint32_t magic;            /* SAT_FLAGS_MAGIC */
+  uint32_t version;          /* SAT_FLAGS_VERSION */
+  uint32_t lifetime_days;    /* Days satellite has worked (sent in Beacon 2 flag1) */
+  uint32_t boot_count;       /* Total boot cycles */
+  uint32_t global_reset_cnt; /* Total 24h PA11 global resets triggered */
+  uint32_t status_flags;     /* Bitmask of SAT_STATUS_* */
+  uint32_t reserved;         /* Reserved */
+  uint32_t crc32;            /* CRC-32 over first 28 bytes */
+};
+
+_Static_assert(sizeof(struct sat_lifetime_flags_s) == 32,
+               "sat_lifetime_flags_s must be 32 bytes (8-byte aligned)");
+
+static struct sat_lifetime_flags_s g_sat_flags;
+
 /* Telemetry acquisition cadence */
 
 #define TELEMETRY_INTERVAL_SEC  90
@@ -1169,7 +1216,13 @@ static int send_telemetry_to_ringbuffer(
   uint16_t bat_i_int =
     (uint16_t)(bat_i * 100.0f);
 
-  int16_t flag1 = 1;
+  /* Beacon 2 last two fields (previously 1 2):
+   *   flag1 = satellite lifetime days (from internal + Micron imp_flags)
+   *   flag2 = 2 (preserved)
+   */
+  int16_t flag1 = (g_sat_flags.lifetime_days <= 32767UL)
+                  ? (int16_t)g_sat_flags.lifetime_days
+                  : (int16_t)32767;
   int16_t flag2 = 2;
 
   /**************************************************************************
@@ -1207,10 +1260,11 @@ static int send_telemetry_to_ringbuffer(
       (int16_t)bat_i_int,
       (int16_t)flag1,
       (int16_t)flag2);
-  printf("[OBC_MAIN] [TX -> M0+] Beacon 2 buffered (I_3v3=%d.%02dA, I_5v=%d.%02dA, I_bat=%d.%02dA)\n",
+  printf("[OBC_MAIN] [TX -> M0+] Beacon 2 buffered (I_3v3=%d.%02dA, I_5v=%d.%02dA, I_bat=%d.%02dA, days=%d, f2=%d)\n",
          main3v3_i_int / 100, (int)abs(main3v3_i_int % 100),
          v_5v_i_int / 100, (int)abs(v_5v_i_int % 100),
-         bat_i_int / 100, (int)abs(bat_i_int % 100));
+         bat_i_int / 100, (int)abs(bat_i_int % 100),
+         (int)flag1, (int)flag2);
   /*
    * Ring IPCC beacon doorbell.
    */
@@ -1416,6 +1470,13 @@ static void flush_cam_write_buf_to_rb(uint32_t frame_id, uint8_t *write_buf,
 #define WL55_GPIOA_ODR            (*(volatile uint32_t *)0x48000014UL)
 #define WL55_GPIOA_BSRR           (*(volatile uint32_t *)0x48000018UL)
 
+#define WL55_GPIOB_MODER          (*(volatile uint32_t *)0x48000400UL)
+#define WL55_GPIOB_OTYPER         (*(volatile uint32_t *)0x48000404UL)
+#define WL55_GPIOB_OSPEEDR        (*(volatile uint32_t *)0x48000408UL)
+#define WL55_GPIOB_PUPDR          (*(volatile uint32_t *)0x4800040CUL)
+#define WL55_GPIOB_ODR            (*(volatile uint32_t *)0x48000414UL)
+#define WL55_GPIOB_BSRR           (*(volatile uint32_t *)0x48000418UL)
+
 #define WL55_GPIOC_MODER          (*(volatile uint32_t *)0x48000800UL)
 #define WL55_GPIOC_OTYPER         (*(volatile uint32_t *)0x48000804UL)
 #define WL55_GPIOC_OSPEEDR        (*(volatile uint32_t *)0x48000808UL)
@@ -1423,15 +1484,63 @@ static void flush_cam_write_buf_to_rb(uint32_t frame_id, uint8_t *write_buf,
 #define WL55_GPIOC_BSRR           (*(volatile uint32_t *)0x48000818UL)
 #define WL55_GPIOC_AFRL           (*(volatile uint32_t *)0x48000820UL)
 
+/* STM32WL55 Internal Flash Registers (FLASHIF_BASE = 0x58004000) */
+#define WL55_FLASH_ACR            (*(volatile uint32_t *)0x58004000UL)
+#define WL55_FLASH_KEYR           (*(volatile uint32_t *)0x58004008UL)
+#define WL55_FLASH_SR             (*(volatile uint32_t *)0x58004010UL)
+#define WL55_FLASH_CR             (*(volatile uint32_t *)0x58004014UL)
+
+#define WL55_FLASH_ACR_ICEN       (1UL << 9)
+#define WL55_FLASH_ACR_DCEN       (1UL << 10)
+#define WL55_FLASH_ACR_ICRST      (1UL << 11)
+#define WL55_FLASH_ACR_DCRST      (1UL << 12)
+
+#define WL55_FLASH_SR_EOP         (1UL << 0)
+#define WL55_FLASH_SR_ERR_MASK    0x0000C3FAUL
+#define WL55_FLASH_SR_BSY         (1UL << 16)
+#define WL55_FLASH_SR_CFGBSY      (1UL << 18)
+#define WL55_FLASH_SR_PESD        (1UL << 19)
+
+#define WL55_FLASH_CR_PG          (1UL << 0)
+#define WL55_FLASH_CR_PER         (1UL << 1)
+#define WL55_FLASH_CR_MER         (1UL << 2)
+#define WL55_FLASH_CR_PNB_SHIFT   3U
+#define WL55_FLASH_CR_PNB_MASK    (0x7FUL << WL55_FLASH_CR_PNB_SHIFT)
+#define WL55_FLASH_CR_START       (1UL << 16)
+#define WL55_FLASH_CR_LOCK        (1UL << 31)
+
+static inline void obc_ext_wdt_kick(void)
+{
+  /* Atomic toggle on PB8 (external 1.6 s watchdog WDI) via BSRR */
+  uint32_t odr = WL55_GPIOB_ODR;
+  WL55_GPIOB_BSRR = (odr & (1UL << 8)) ? (1UL << (8 + 16)) : (1UL << 8);
+}
+
 /* Configure PA0 (EN 5V DC/DC & OCP), PA12 (EN 3V3 DC/DC & OCP), and PC13 (MSN Board EN)
  * as outputs, all initially OFF (LOW) at boot to save power.
+ * Also configure PB8 (1.6 s Watchdog WDI) push-pull + kick, and PA11 (24h Global Reset) LOW.
  */
 static void obc_power_rails_init_off(void)
 {
   irqstate_t flags = enter_critical_section();
 
-  /* Enable GPIOA (bit 0) and GPIOC (bit 2) clocks */
-  WL55_RCC_AHB2ENR |= (1UL << 0) | (1UL << 2);
+  /* Enable GPIOA (bit 0), GPIOB (bit 1), and GPIOC (bit 2) clocks */
+  WL55_RCC_AHB2ENR |= (1UL << 0) | (1UL << 1) | (1UL << 2);
+
+  /* PB8 (1.6 s Watchdog WDI): Output Push-Pull -> kick (toggle) */
+  WL55_GPIOB_MODER   = (WL55_GPIOB_MODER   & ~(3UL << 16)) | (1UL << 16);
+  WL55_GPIOB_OTYPER &= ~(1UL << 8);
+  WL55_GPIOB_OSPEEDR = (WL55_GPIOB_OSPEEDR & ~(3UL << 16)) | (1UL << 16);
+  WL55_GPIOB_PUPDR  &= ~(3UL << 16);
+  obc_ext_wdt_kick();
+
+  /* PA11 (24h Global Reset): Output Push-Pull -> LOW (idle; pulsed HIGH every 24h) */
+  WL55_GPIOA_BSRR    = (1UL << (11 + 16));
+  WL55_GPIOA_MODER   = (WL55_GPIOA_MODER   & ~(3UL << 22)) | (1UL << 22);
+  WL55_GPIOA_OTYPER &= ~(1UL << 11);
+  WL55_GPIOA_OSPEEDR = (WL55_GPIOA_OSPEEDR & ~(3UL << 22)) | (1UL << 22);
+  WL55_GPIOA_PUPDR  &= ~(3UL << 22);
+  WL55_GPIOA_BSRR    = (1UL << (11 + 16));
 
   /* PA0: Output (01b), Push-Pull (0), High Speed (10b), No Pull (00b) -> LOW (OFF) */
   WL55_GPIOA_MODER   = (WL55_GPIOA_MODER   & ~(3UL << 0))  | (1UL << 0);
@@ -2203,6 +2312,395 @@ static int ensure_named_partition_mounted(const char *dev, const char *mnt)
       return -errno;
     }
   return 0;
+}
+
+/****************************************************************************
+ * Satellite Lifetime & Status Flags (Internal WL55 Flash + Micron imp_flags)
+ * and 24-Hour Global Reset (PA11)
+ ****************************************************************************/
+
+static uint32_t sat_flags_crc32(const struct sat_lifetime_flags_s *f)
+{
+  const uint8_t *p = (const uint8_t *)f;
+  size_t len = offsetof(struct sat_lifetime_flags_s, crc32);
+  uint32_t crc = 0xFFFFFFFFUL;
+
+  for (size_t i = 0; i < len; i++)
+    {
+      crc ^= (uint32_t)p[i];
+      for (int b = 0; b < 8; b++)
+        {
+          crc = (crc & 1UL) ? ((crc >> 1) ^ 0xEDB88320UL) : (crc >> 1);
+        }
+    }
+
+  return ~crc;
+}
+
+static bool sat_flags_is_valid(const struct sat_lifetime_flags_s *f)
+{
+  if (f == NULL)
+    {
+      return false;
+    }
+
+  return (f->magic == SAT_FLAGS_MAGIC) &&
+         (f->version == SAT_FLAGS_VERSION) &&
+         (f->crc32 == sat_flags_crc32(f));
+}
+
+static bool sat_flags_slot_erased(uint32_t addr)
+{
+  const volatile uint32_t *w = (const volatile uint32_t *)addr;
+  size_t nwords = sizeof(struct sat_lifetime_flags_s) / sizeof(uint32_t);
+
+  for (size_t i = 0; i < nwords; i++)
+    {
+      if (w[i] != 0xFFFFFFFFUL)
+        {
+          return false;
+        }
+    }
+
+  return true;
+}
+
+static bool sat_flags_read_internal(struct sat_lifetime_flags_s *out)
+{
+  const size_t slot_sz  = sizeof(struct sat_lifetime_flags_s);
+  const size_t nslots   = WL55_INT_FLAGS_PAGE_SIZE / slot_sz;
+  bool found = false;
+  struct sat_lifetime_flags_s tmp;
+
+  for (size_t i = 0; i < nslots; i++)
+    {
+      uint32_t addr = WL55_INT_FLAGS_ADDR + (uint32_t)(i * slot_sz);
+      memcpy(&tmp, (const void *)addr, slot_sz);
+      if (sat_flags_is_valid(&tmp))
+        {
+          *out = tmp;
+          found = true;
+        }
+    }
+
+  return found;
+}
+
+static bool sat_flags_write_internal(const struct sat_lifetime_flags_s *in)
+{
+  const size_t slot_sz = sizeof(struct sat_lifetime_flags_s);
+  const size_t nslots  = WL55_INT_FLAGS_PAGE_SIZE / slot_sz;
+  uint32_t target_addr = 0;
+  bool need_erase = true;
+
+  for (size_t i = 0; i < nslots; i++)
+    {
+      uint32_t addr = WL55_INT_FLAGS_ADDR + (uint32_t)(i * slot_sz);
+      if (sat_flags_slot_erased(addr))
+        {
+          target_addr = addr;
+          need_erase = false;
+          break;
+        }
+    }
+
+  if (need_erase)
+    {
+      target_addr = WL55_INT_FLAGS_ADDR;
+    }
+
+  irqstate_t flags = enter_critical_section();
+
+  /* Wait for any ongoing flash operation to finish */
+  uint32_t guard = 200000UL;
+  while (((WL55_FLASH_SR & (WL55_FLASH_SR_BSY | WL55_FLASH_SR_CFGBSY |
+                            WL55_FLASH_SR_PESD)) != 0UL) && (guard-- > 0UL))
+    {
+    }
+
+  /* Clear sticky error & EOP flags */
+  WL55_FLASH_SR = WL55_FLASH_SR_ERR_MASK | WL55_FLASH_SR_EOP;
+
+  /* Unlock FLASH_CR */
+  if (WL55_FLASH_CR & WL55_FLASH_CR_LOCK)
+    {
+      WL55_FLASH_KEYR = 0x45670123UL;
+      WL55_FLASH_KEYR = 0xCDEF89ABUL;
+    }
+
+  bool ok = true;
+
+  if (need_erase)
+    {
+      WL55_FLASH_CR = (WL55_FLASH_CR & ~(WL55_FLASH_CR_PG | WL55_FLASH_CR_MER |
+                                         WL55_FLASH_CR_PNB_MASK)) |
+                      WL55_FLASH_CR_PER |
+                      (WL55_INT_FLAGS_PAGE << WL55_FLASH_CR_PNB_SHIFT);
+      WL55_FLASH_CR |= WL55_FLASH_CR_START;
+
+      guard = 500000UL;
+      while (((WL55_FLASH_SR & (WL55_FLASH_SR_BSY | WL55_FLASH_SR_CFGBSY)) != 0UL) &&
+             (guard-- > 0UL))
+        {
+        }
+
+      WL55_FLASH_CR &= ~(WL55_FLASH_CR_PER | WL55_FLASH_CR_PNB_MASK);
+      if ((WL55_FLASH_SR & WL55_FLASH_SR_ERR_MASK) != 0UL)
+        {
+          ok = false;
+        }
+      WL55_FLASH_SR = WL55_FLASH_SR_ERR_MASK | WL55_FLASH_SR_EOP;
+    }
+
+  if (ok)
+    {
+      const uint32_t *words = (const uint32_t *)in;
+      const size_t ndwords  = slot_sz / 8U;
+
+      WL55_FLASH_CR |= WL55_FLASH_CR_PG;
+      for (size_t d = 0; d < ndwords; d++)
+        {
+          uint32_t dw_addr = target_addr + (uint32_t)(d * 8U);
+          *(volatile uint32_t *)(dw_addr)     = words[d * 2U];
+          *(volatile uint32_t *)(dw_addr + 4U) = words[d * 2U + 1U];
+          __asm__ volatile ("dsb" ::: "memory");
+
+          guard = 200000UL;
+          while (((WL55_FLASH_SR & (WL55_FLASH_SR_BSY | WL55_FLASH_SR_CFGBSY)) != 0UL) &&
+                 (guard-- > 0UL))
+            {
+            }
+
+          if ((WL55_FLASH_SR & WL55_FLASH_SR_ERR_MASK) != 0UL)
+            {
+              ok = false;
+              break;
+            }
+          WL55_FLASH_SR = WL55_FLASH_SR_EOP;
+        }
+
+      WL55_FLASH_CR &= ~WL55_FLASH_CR_PG;
+    }
+
+  /* Flush flash caches so subsequent reads see freshly written words */
+  uint32_t acr = WL55_FLASH_ACR;
+  WL55_FLASH_ACR = acr & ~(WL55_FLASH_ACR_ICEN | WL55_FLASH_ACR_DCEN);
+  WL55_FLASH_ACR = (acr & ~(WL55_FLASH_ACR_ICEN | WL55_FLASH_ACR_DCEN)) |
+                   WL55_FLASH_ACR_ICRST | WL55_FLASH_ACR_DCRST;
+  WL55_FLASH_ACR = acr;
+  __asm__ volatile ("dsb\n\tisb" ::: "memory");
+
+  /* Re-lock FLASH_CR */
+  WL55_FLASH_CR |= WL55_FLASH_CR_LOCK;
+
+  leave_critical_section(flags);
+
+  if (ok && memcmp((const void *)target_addr, in, slot_sz) != 0)
+    {
+      ok = false;
+    }
+
+  return ok;
+}
+
+static bool sat_flags_read_external(struct sat_lifetime_flags_s *out)
+{
+  bool ok = false;
+
+  if (ensure_named_partition_mounted(IMP_FLAGS_DEV, IMP_FLAGS_MNT) != 0)
+    {
+      return false;
+    }
+
+  int fd = open(IMP_FLAGS_FILE, O_RDONLY);
+  if (fd >= 0)
+    {
+      struct sat_lifetime_flags_s tmp;
+      ssize_t n = read(fd, &tmp, sizeof(tmp));
+      close(fd);
+      if (n == (ssize_t)sizeof(tmp) && sat_flags_is_valid(&tmp))
+        {
+          *out = tmp;
+          ok = true;
+        }
+    }
+
+  umount(IMP_FLAGS_MNT);
+  return ok;
+}
+
+static bool sat_flags_write_external(const struct sat_lifetime_flags_s *in)
+{
+  bool ok = false;
+
+  if (ensure_named_partition_mounted(IMP_FLAGS_DEV, IMP_FLAGS_MNT) != 0)
+    {
+      return false;
+    }
+
+  int fd = open(IMP_FLAGS_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  if (fd >= 0)
+    {
+      ssize_t n = write(fd, in, sizeof(*in));
+      fsync(fd);
+      close(fd);
+      ok = (n == (ssize_t)sizeof(*in));
+    }
+
+  umount(IMP_FLAGS_MNT);
+  return ok;
+}
+
+static void sat_lifetime_flags_save_both(void)
+{
+  g_sat_flags.magic   = SAT_FLAGS_MAGIC;
+  g_sat_flags.version = SAT_FLAGS_VERSION;
+  g_sat_flags.status_flags |= (SAT_STATUS_WDT_PB8_HIGH |
+                               SAT_STATUS_INT_FLASH_OK |
+                               SAT_STATUS_EXT_FLASH_OK);
+  g_sat_flags.crc32 = sat_flags_crc32(&g_sat_flags);
+
+  bool int_ok = sat_flags_write_internal(&g_sat_flags);
+  bool ext_ok = sat_flags_write_external(&g_sat_flags);
+
+  /* If either storage failed, record exact health bit in the surviving copy */
+  if (!int_ok || !ext_ok)
+    {
+      if (!int_ok)
+        {
+          g_sat_flags.status_flags &= ~SAT_STATUS_INT_FLASH_OK;
+        }
+      if (!ext_ok)
+        {
+          g_sat_flags.status_flags &= ~SAT_STATUS_EXT_FLASH_OK;
+        }
+      g_sat_flags.crc32 = sat_flags_crc32(&g_sat_flags);
+      if (int_ok)
+        {
+          sat_flags_write_internal(&g_sat_flags);
+        }
+      if (ext_ok)
+        {
+          sat_flags_write_external(&g_sat_flags);
+        }
+    }
+
+  printf("[OBC_MAIN] [FLAGS] Saved lifetime_days=%lu boot=%lu resets=%lu "
+         "status=0x%02lX (WL55_INT=%s, MICRON_IMP=%s)\n",
+         (unsigned long)g_sat_flags.lifetime_days,
+         (unsigned long)g_sat_flags.boot_count,
+         (unsigned long)g_sat_flags.global_reset_cnt,
+         (unsigned long)g_sat_flags.status_flags,
+         int_ok ? "OK" : "FAIL",
+         ext_ok ? "OK" : "FAIL");
+}
+
+static void sat_lifetime_flags_init(void)
+{
+  struct sat_lifetime_flags_s int_rec;
+  struct sat_lifetime_flags_s ext_rec;
+  bool int_valid = sat_flags_read_internal(&int_rec);
+  bool ext_valid = sat_flags_read_external(&ext_rec);
+
+  memset(&g_sat_flags, 0, sizeof(g_sat_flags));
+
+  if (int_valid && ext_valid)
+    {
+      if (ext_rec.lifetime_days > int_rec.lifetime_days ||
+          (ext_rec.lifetime_days == int_rec.lifetime_days &&
+           ext_rec.boot_count > int_rec.boot_count))
+        {
+          g_sat_flags = ext_rec;
+        }
+      else
+        {
+          g_sat_flags = int_rec;
+        }
+    }
+  else if (int_valid)
+    {
+      g_sat_flags = int_rec;
+      printf("[OBC_MAIN] [FLAGS] Restored lifetime flags from Internal WL55 Flash\n");
+    }
+  else if (ext_valid)
+    {
+      g_sat_flags = ext_rec;
+      printf("[OBC_MAIN] [FLAGS] Restored lifetime flags from Micron /mnt/imp_flags\n");
+    }
+  else
+    {
+      printf("[OBC_MAIN] [FLAGS] Fresh satellite boot: initializing lifetime_days=0\n");
+    }
+
+  g_sat_flags.boot_count++;
+  g_sat_flags.status_flags |= (SAT_STATUS_BOOT_OK | SAT_STATUS_WDT_PB8_HIGH);
+
+  sat_lifetime_flags_save_both();
+}
+
+static void sat_check_24h_global_reset(struct timespec *reset_ref_ts)
+{
+  static uint32_t wdt_div = 0;
+  struct timespec now_ts;
+  clock_gettime(CLOCK_MONOTONIC, &now_ts);
+
+  /* Kick external 1.6 s watchdog (PB8 toggle) every ~200 ms from M4 too
+   * (in addition to M0+ 50 ms SysTick toggle) so WDT stays alive even if
+   * M0+ is halted or not yet booted. */
+  if (++wdt_div >= 10U)
+    {
+      wdt_div = 0;
+      obc_ext_wdt_kick();
+    }
+
+  if (now_ts.tv_sec < reset_ref_ts->tv_sec)
+    {
+      *reset_ref_ts = now_ts;
+      return;
+    }
+
+  uint32_t elapsed = (uint32_t)(now_ts.tv_sec - reset_ref_ts->tv_sec);
+  if (elapsed < GLOBAL_RESET_INTERVAL_SEC)
+    {
+      return;
+    }
+
+  /* Brief grace window so we don't cut an active RF downlink or camera capture */
+  if ((sat_is_downlink_active() || g_camera_capture_active) &&
+      elapsed < (GLOBAL_RESET_INTERVAL_SEC + GLOBAL_RESET_GRACE_SEC))
+    {
+      return;
+    }
+
+  /* 24 hours elapsed: increment lifetime days & persist to BOTH flashes */
+  g_sat_flags.lifetime_days++;
+  g_sat_flags.global_reset_cnt++;
+  g_sat_flags.status_flags |= (SAT_STATUS_GLOBAL_RST_24H | SAT_STATUS_WDT_PB8_HIGH);
+
+  printf("\n=============================================================\n");
+  printf("[OBC_MAIN] [GLOBAL_RESET] 24h elapsed! Updating lifetime_days=%lu\n",
+         (unsigned long)g_sat_flags.lifetime_days);
+  printf("=============================================================\n");
+
+  sat_lifetime_flags_save_both();
+  fflush(stdout);
+  usleep(50000); /* 50 ms settle after flash writes */
+
+  /* Trigger PA11 Global Reset HIGH pulse (500 ms) */
+  printf("[OBC_MAIN] [GLOBAL_RESET] Asserting PA11 HIGH...\n");
+  fflush(stdout);
+
+  WL55_RCC_AHB2ENR |= (1UL << 0);
+  WL55_GPIOA_MODER   = (WL55_GPIOA_MODER & ~(3UL << 22)) | (1UL << 22);
+  WL55_GPIOA_OTYPER &= ~(1UL << 11);
+  WL55_GPIOA_BSRR    = (1UL << 11); /* PA11 HIGH */
+
+  usleep(GLOBAL_RESET_PULSE_US);
+
+  /* If external Global Reset IC is not populated (bench test), release PA11
+   * and start the next 24h cycle instead of spinning. */
+  WL55_GPIOA_BSRR = (1UL << (11 + 16)); /* PA11 LOW */
+  clock_gettime(CLOCK_MONOTONIC, reset_ref_ts);
 }
 
 static size_t epdm_capture_via_lpuart1(void)
@@ -3925,12 +4423,13 @@ int obc_main_main(int argc, char *argv[])
          TELEMETRY_INTERVAL_SEC);
   printf("=============================================================\n");
 
-  /* Initialize PA0 (5V DC/DC), PA12 (3.3V DC/DC), and PC13 (MSN Board) as OFF to save power */
+  /* Initialize PA0 (5V DC/DC), PA12 (3.3V DC/DC), and PC13 (MSN Board) as OFF to save power.
+   * Also configures Watchdog WDI PB8 (1.6s toggle) and Global Reset PA11 = LOW. */
   obc_power_rails_init_off();
-  printf("[OBC_MAIN] [POWER] Power rails initialized OFF (PA0=OFF, PA12=OFF, PC13=OFF) - ON only on command\n");
+  printf("[OBC_MAIN] [POWER] Rails OFF (PA0/PA12/PC13=LOW) | WDT PB8=TOGGLE(1.6s) | GlobalRst PA11=LOW\n");
 
   /**************************************************************************
-   * 1. Initialize local telemetry ring buffer
+   * 1. Initialize local telemetry ring buffer & satellite lifetime flags
    **************************************************************************/
 
   printf("[OBC_MAIN] Initializing telemetry & camera ring buffers...\n");
@@ -3938,6 +4437,9 @@ int obc_main_main(int argc, char *argv[])
   telemetry_rb_init();
   rb_init();
   ensure_hk_partition_mounted();
+  /* Load/reconcile satellite lifetime days & status flags from BOTH
+   * Internal WL55 Flash (Page 99) and External Micron Flash (/mnt/imp_flags) */
+  sat_lifetime_flags_init();
   /* Camera & mission partitions are mounted on demand to preserve CPU1 SRAM heap */
 
   printf("[OBC_MAIN] Telemetry & camera ring buffers + HK flash partitions (/mnt/hk1, /mnt/hk2) initialized\n");
@@ -4092,8 +4594,10 @@ int obc_main_main(int argc, char *argv[])
          TELEMETRY_INTERVAL_SEC);
 
   struct timespec last_telem_ts;
+  struct timespec global_reset_ts;
   bool first_telem = true;
   memset(&last_telem_ts, 0, sizeof(last_telem_ts));
+  clock_gettime(CLOCK_MONOTONIC, &global_reset_ts);
 
   /**************************************************************************
    * 10. Main OBC loop
@@ -4152,6 +4656,12 @@ int obc_main_main(int argc, char *argv[])
                      TELEMETRY_INTERVAL_SEC);
             }
         }
+
+      /**********************************************************************
+       * 24-Hour Global Reset (PA11) & Watchdog (PB8 HIGH) maintenance
+       **********************************************************************/
+
+      sat_check_24h_global_reset(&global_reset_ts);
 
       /**********************************************************************
        * Main loop period: 20 ms so ground commands are serviced quickly

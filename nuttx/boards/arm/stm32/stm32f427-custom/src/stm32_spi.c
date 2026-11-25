@@ -65,14 +65,20 @@ struct spi_dev_s *g_spidev5 = NULL;
 
 void weak_function stm32_spidev_initialize(void)
 {
+#ifdef CONFIG_STM32_SPI3
+  stm32_configgpio(GPIO_SPI3_NSS);   /* RGB OpenMV CS on PC9 (idle HIGH) */
+#endif
+#ifdef CONFIG_STM32_SPI4
+  stm32_configgpio(GPIO_SPI4_NSS);   /* NIR OpenMV CS on PE3 (idle HIGH) */
+#ifdef CONFIG_MTD_SST25XX
+  stm32_configgpio(GPIO_CS_SST25);   /* SST25 FLASH chip select */
+#endif
+#endif
 #ifdef CONFIG_STM32_SPI5
   stm32_configgpio(GPIO_CS_MEMS);    /* MEMS chip select */
   stm32_configgpio(GPIO_CS_LCD);     /* LCD chip select */
   stm32_configgpio(GPIO_LCD_DC);     /* LCD Data/Command select */
   stm32_configgpio(GPIO_LCD_ENABLE); /* LCD enable select */
-#endif
-#if defined(CONFIG_STM32_SPI4) && defined(CONFIG_MTD_SST25XX)
-  stm32_configgpio(GPIO_CS_SST25);   /* SST25 FLASH chip select */
 #endif
 }
 
@@ -138,6 +144,7 @@ void stm32_spi3select(struct spi_dev_s *dev,
 {
   spiinfo("devid: %d CS: %s\n",
           (int)devid, selected ? "assert" : "de-assert");
+  stm32_gpiowrite(GPIO_SPI3_NSS, !selected);
 }
 
 uint8_t stm32_spi3status(struct spi_dev_s *dev, uint32_t devid)
@@ -150,12 +157,18 @@ uint8_t stm32_spi3status(struct spi_dev_s *dev, uint32_t devid)
 void stm32_spi4select(struct spi_dev_s *dev,
                       uint32_t devid, bool selected)
 {
+  spiinfo("devid: %d CS: %s\n",
+          (int)devid, selected ? "assert" : "de-assert");
 #if defined(CONFIG_MTD_SST25XX)
   if (devid == SPIDEV_FLASH(0))
     {
       stm32_gpiowrite(GPIO_CS_SST25, !selected);
     }
+  else
 #endif
+    {
+      stm32_gpiowrite(GPIO_SPI4_NSS, !selected);
+    }
 }
 
 uint8_t stm32_spi4status(struct spi_dev_s *dev, uint32_t devid)
