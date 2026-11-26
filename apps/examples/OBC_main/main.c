@@ -1509,16 +1509,11 @@ static void flush_cam_write_buf_to_rb(uint32_t frame_id, uint8_t *write_buf,
 #define WL55_FLASH_CR_START       (1UL << 16)
 #define WL55_FLASH_CR_LOCK        (1UL << 31)
 
-static inline void obc_ext_wdt_kick(void)
-{
-  /* Atomic toggle on PB8 (external 1.6 s watchdog WDI) via BSRR */
-  uint32_t odr = WL55_GPIOB_ODR;
-  WL55_GPIOB_BSRR = (odr & (1UL << 8)) ? (1UL << (8 + 16)) : (1UL << 8);
-}
-
 /* Configure PA0 (EN 5V DC/DC & OCP), PA12 (EN 3V3 DC/DC & OCP), and PC13 (MSN Board EN)
  * as outputs, all initially OFF (LOW) at boot to save power.
- * Also configure PB8 (1.6 s Watchdog WDI) push-pull + kick, and PA11 (24h Global Reset) LOW.
+ * Also configure PA11 (24h Global Reset) LOW.
+ * NOTE: PB8 (external 1.6 s Watchdog WDI) is owned exclusively by the NuttX
+ *       kernel thread "ext_wdt" in stm32_boot.c (500 ms alternating toggle).
  */
 static void obc_power_rails_init_off(void)
 {
@@ -1526,13 +1521,6 @@ static void obc_power_rails_init_off(void)
 
   /* Enable GPIOA (bit 0), GPIOB (bit 1), and GPIOC (bit 2) clocks */
   WL55_RCC_AHB2ENR |= (1UL << 0) | (1UL << 1) | (1UL << 2);
-
-  /* PB8 (1.6 s Watchdog WDI): Output Push-Pull -> kick (toggle) */
-  WL55_GPIOB_MODER   = (WL55_GPIOB_MODER   & ~(3UL << 16)) | (1UL << 16);
-  WL55_GPIOB_OTYPER &= ~(1UL << 8);
-  WL55_GPIOB_OSPEEDR = (WL55_GPIOB_OSPEEDR & ~(3UL << 16)) | (1UL << 16);
-  WL55_GPIOB_PUPDR  &= ~(3UL << 16);
-  obc_ext_wdt_kick();
 
   /* PA11 (24h Global Reset): Output Push-Pull -> LOW (idle; pulsed HIGH every 24h) */
   WL55_GPIOA_BSRR    = (1UL << (11 + 16));
@@ -2640,18 +2628,8 @@ static void sat_lifetime_flags_init(void)
 
 static void sat_check_24h_global_reset(struct timespec *reset_ref_ts)
 {
-  static uint32_t wdt_div = 0;
   struct timespec now_ts;
   clock_gettime(CLOCK_MONOTONIC, &now_ts);
-
-  /* Kick external 1.6 s watchdog (PB8 toggle) every ~200 ms from M4 too
-   * (in addition to M0+ 50 ms SysTick toggle) so WDT stays alive even if
-   * M0+ is halted or not yet booted. */
-  if (++wdt_div >= 10U)
-    {
-      wdt_div = 0;
-      obc_ext_wdt_kick();
-    }
 
   if (now_ts.tv_sec < reset_ref_ts->tv_sec)
     {

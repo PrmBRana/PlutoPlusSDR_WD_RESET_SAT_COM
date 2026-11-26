@@ -131,17 +131,11 @@ int32_t RBI_Init(void)
     HAL_GPIO_WritePin(DCDC_5V_EN_PORT, DCDC_5V_EN_PIN, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(GPIOC, AMP_3V3_EN_PIN | AMP_5V_EN_PIN | FE_CTRL1_PIN | FE_CTRL2_PIN, GPIO_PIN_RESET);
 
-    /* External 1.6s watchdog WDI (PB8): push-pull output, toggled every 50 ms in SysTick */
-    __HAL_RCC_GPIOB_CLK_ENABLE();
-    RCC->AHB2ENR   |= RCC_AHB2ENR_GPIOBEN;
-    RCC->C2AHB2ENR |= RCC_C2AHB2ENR_GPIOBEN;
-    GPIO_InitStruct.Pin   = EXT_WDT_WDI_PIN;
-    GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull  = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(EXT_WDT_WDI_PORT, &GPIO_InitStruct);
-    HAL_GPIO_TogglePin(EXT_WDT_WDI_PORT, EXT_WDT_WDI_PIN);
-    g_ext_wdt_armed = 1;
+    /* External 1.6s watchdog WDI (PB8) is owned exclusively by CPU1 (M4 NuttX
+     * ext_wdt kernel thread, 500 ms toggle). Do not drive PB8 from CPU2 so the
+     * 500 ms waveform is undisturbed and an M4 hang still triggers WDT reset.
+     */
+    g_ext_wdt_armed = 0;
 
     return 0;
 }

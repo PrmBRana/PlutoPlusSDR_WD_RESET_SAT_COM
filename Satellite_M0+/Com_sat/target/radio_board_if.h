@@ -90,11 +90,11 @@ extern "C" {
 #define FE_CTRL2_PIN        GPIO_PIN_5    /* PC5: RF Switch Front-End Control 2 (FE_CTRL2: TX=1, RX=0) */
 #define FE_CTRL2_PORT       GPIOC
 
-/* External 1.6s watchdog input (PB8 / WD_WDL_OBC): edge-triggered WDI.
- * Toggled every 50 ms from SysTick_Handler once RBI_Init() has run. */
+/* External 1.6s watchdog input (PB8 / WD_WDL_OBC): owned exclusively by
+ * CPU1 (M4 NuttX ext_wdt task, 500 ms toggle). CPU2 keeps g_ext_wdt_armed = 0. */
 #define EXT_WDT_WDI_PIN     GPIO_PIN_8
 #define EXT_WDT_WDI_PORT    GPIOB
-#define EXT_WDT_KICK_MS     50U
+#define EXT_WDT_KICK_MS     500U
 
 extern volatile uint8_t g_ext_wdt_armed;
 

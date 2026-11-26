@@ -25,10 +25,16 @@
  ****************************************************************************/
 
 #include <nuttx/config.h>
+#include <nuttx/clock.h>
+#include <nuttx/sched.h>
+#include <nuttx/kthread.h>
+#include <nuttx/signal.h>
 
 #include <nuttx/debug.h>
 
 #include <sys/types.h>
+#include <stdint.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <fcntl.h>
@@ -206,13 +212,42 @@ static int stm32wl5_mt25q_initialize(void)
 
 #endif
 
+/* Initialized true to match GPIO_OUTPUT_SET on PB8 in
+ * stm32wl5_board_initialize(), so the first kick produces a real edge.
+ */
+
+static bool g_ext_wdt_state = true;
+
 static inline void stm32wl5_ext_wdt_kick(void)
 {
-  /* Atomic toggle on PB8 (external 1.6 s watchdog WDI) via BSRR */
+  g_ext_wdt_state = !g_ext_wdt_state;
 
-  uint32_t odr = getreg32(0x48000414UL); /* GPIOB_ODR */
-  putreg32((odr & (1UL << 8)) ? (1UL << (8 + 16)) : (1UL << 8), 0x48000418UL);
+  if (g_ext_wdt_state)
+    {
+      putreg32(1UL << 8, 0x48000418UL);       /* PB8 HIGH */
+    }
+  else
+    {
+      putreg32(1UL << 24, 0x48000418UL);      /* PB8 LOW */
+    }
 }
+
+#ifdef CONFIG_BOARD_LATE_INITIALIZE
+static int stm32wl5_ext_wdt_task(int argc, char *argv[])
+{
+  UNUSED(argc);
+  UNUSED(argv);
+
+  while (1)
+    {
+      stm32wl5_ext_wdt_kick();
+
+      nxsig_usleep(500000);  /* 500 ms */
+    }
+
+  return OK;
+}
+#endif
 
 void stm32wl5_board_initialize(void)
 {
@@ -400,6 +435,22 @@ void board_late_initialize(void)
 {
   int ret;
 
+  /* Start dedicated external 1.6 s watchdog task (500 ms PB8 toggle).
+   * Must be created here (not in stm32wl5_board_initialize()) because
+   * the NuttX heap, scheduler, and system tick are only active after
+   * nx_start(). Uses 1024-byte stack since CONFIG_ARCH_INTERRUPTSTACK=0.
+   */
+
+  ret = kthread_create("ext_wdt",
+                       SCHED_PRIORITY_MAX - 10,
+                       1024,
+                       stm32wl5_ext_wdt_task,
+                       NULL);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: Failed to start ext_wdt kthread: %d\n", ret);
+    }
+
 #if defined(CONFIG_ARCH_BOARD_ENABLE_CPU2)
   /* Pre-enable CPU2 peripheral clocks (IPCC, FLASH, HSEM, GPIOA/B/C) early
    * so CPU2 never HardFaults on unclocked GPIO/IPCC if already active on reset.
@@ -485,9 +536,7 @@ void board_late_initialize(void)
 #if defined(CONFIG_MTD_M25P)
   /* Initialize external MT25Q NOR flash and partitions */
 
-  stm32wl5_ext_wdt_kick();
   ret = stm32wl5_mt25q_initialize();
-  stm32wl5_ext_wdt_kick();
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: stm32wl5_mt25q_initialize() failed: %d\n", ret);
@@ -526,7 +575,6 @@ void board_late_initialize(void)
   bool boot_hs_ok = false;
   while (boot_hs_retries-- > 0)
     {
-      stm32wl5_ext_wdt_kick();
       putreg32((1 << 16), 0x58000C08);   /* IPCC_C1SCR: Set channel 1 TX flag to M0+ */
       up_mdelay(10);
       if ((getreg32(0x58000C1C) & (1 << 0)) != 0) /* IPCC_C2TOC1SR: Check if M0+ answered */
