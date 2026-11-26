@@ -1053,8 +1053,14 @@ void SUBGRF_SetSwitch( uint8_t paSelect, RFState_t rxtx )
 
     if (rxtx == RFSWITCH_TX)
     {
-        /* Ground Station is ALWAYS High Power (+22 dBm) to SMA connector */
-        state = RBI_SWITCH_RFO_HP;
+        if (paSelect == RFO_LP)
+        {
+            state = RBI_SWITCH_RFO_LP;
+        }
+        else
+        {
+            state = RBI_SWITCH_RFO_HP;
+        }
         Radio_SMPS_Set(SMPS_DRIVE_SETTING_MAX);
     }
     else

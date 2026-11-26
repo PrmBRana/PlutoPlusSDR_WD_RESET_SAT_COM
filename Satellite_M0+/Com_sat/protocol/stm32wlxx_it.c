@@ -14,6 +14,18 @@
 volatile uint32_t g_system_tick_ms = 0;
 volatile uint8_t g_ext_wdt_armed = 0;
 
+/* Shared SRAM2 liveness heartbeat read by CPU1 (M4 ext_wdt kthread) */
+#define M0_HB_MAGIC_ADDR  (*(volatile uint32_t *)0x20008040UL)
+#define M0_HB_COUNT_ADDR  (*(volatile uint32_t *)0x20008044UL)
+#define M0_HB_MAGIC_VAL   0x4D304842UL /* "M0HB" */
+
+void CPU2_Heartbeat(void)
+{
+    M0_HB_COUNT_ADDR++;
+    __DSB();
+    M0_HB_MAGIC_ADDR = M0_HB_MAGIC_VAL;
+}
+
 void SysTick_Handler(void)
 {
     g_system_tick_ms++;
@@ -39,6 +51,7 @@ void SysTick_Init_CPU2(uint32_t sys_freq_hz)
 
 void CPU2_Poll_IPC(void)
 {
+    CPU2_Heartbeat();
     if (ipcc_m0_received(IPCC_CH_HANDSHAKE))
     {
         ipcc_m0_clear(IPCC_CH_HANDSHAKE);
@@ -85,18 +98,12 @@ void CPU2_Delay_Ms(uint32_t ms)
     }
 }
 
-void NMI_Handler(void)
-{
-    while (1)
-    {
-    }
-}
-
 static void uart1_direct_puts(const char *s)
 {
     while (*s)
     {
-        while (!((*(volatile uint32_t *)0x4001381CUL) & (1UL << 7)));
+        uint32_t guard = 50000UL;
+        while (!((*(volatile uint32_t *)0x4001381CUL) & (1UL << 7)) && guard--);
         (*(volatile uint32_t *)0x40013828UL) = (uint8_t)(*s++);
     }
 }
@@ -106,8 +113,39 @@ static void uart1_direct_hex32(uint32_t val)
     const char hex[] = "0123456789ABCDEF";
     for (int i = 28; i >= 0; i -= 4)
     {
-        while (!((*(volatile uint32_t *)0x4001381CUL) & (1UL << 7)));
+        uint32_t guard = 50000UL;
+        while (!((*(volatile uint32_t *)0x4001381CUL) & (1UL << 7)) && guard--);
         (*(volatile uint32_t *)0x40013828UL) = hex[(val >> i) & 0x0F];
+    }
+}
+
+void cpu2_uart_panic(const char *tag)
+{
+    (*(volatile uint32_t *)0x58000160UL) |= (1UL << 14); /* RCC_C2APB2ENR USART1 */
+    (*(volatile uint32_t *)0x40013820UL) = 0xFFFFFFFFUL; /* USART1_ICR */
+    (*(volatile uint32_t *)0x40013800UL) |= (1UL << 0) | (1UL << 3); /* UE | TE */
+    uart1_direct_puts("\r\n[CPU2 TRAP] ");
+    uart1_direct_puts(tag);
+    uart1_direct_puts(" IPSR=0x");
+    uart1_direct_hex32(__get_IPSR());
+    uart1_direct_puts("\r\n");
+}
+
+void NMI_Handler(void)
+{
+    cpu2_uart_panic("NMI");
+    while (1)
+    {
+        __NOP();
+    }
+}
+
+void Default_Handler_C(void)
+{
+    cpu2_uart_panic("UNHANDLED_IRQ");
+    while (1)
+    {
+        __NOP();
     }
 }
 

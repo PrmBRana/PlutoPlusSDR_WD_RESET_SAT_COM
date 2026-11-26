@@ -733,7 +733,7 @@ class SDRSocketServer:
 
 PA_SETTINGS = {
     "HP": (b"PA HP\r\n", b"PWR 22\r\n"),
-    "LP": (b"PA HP\r\n", b"PWR 22\r\n"),  # Locked to RFO_HP +22 dBm: Nucleo-WL55JC2 requires RFO_HP for SMA
+    "LP": (b"PA LP\r\n", b"PWR 14\r\n"),
 }
 
 
@@ -1414,23 +1414,25 @@ def run_gui(default_port=None, baudrate=115200, pa="HP"):
                  values=["9600", "57600", "115200", "230400"]).pack(side=tk.LEFT)
 
     ttk.Label(conn_bar, text="Uplink PA:").pack(side=tk.LEFT, padx=(12, 4))
-    pa_var = tk.StringVar(value="HP")
-    pa_combo = ttk.Combobox(conn_bar, textvariable=pa_var, width=20, state="disabled",
-                            values=["HP (RFO_HP +22 dBm)"])
+    pa_var = tk.StringVar(value="HP (RFO_HP +22 dBm)" if pa.upper() != "LP" else "LP (RFO_LP +14 dBm)")
+    pa_combo = ttk.Combobox(conn_bar, textvariable=pa_var, width=20, state="readonly",
+                            values=["HP (RFO_HP +22 dBm)", "LP (RFO_LP +14 dBm)"])
     pa_combo.pack(side=tk.LEFT)
 
     def on_pa_selected(event=None):
         if ser and ser.is_open:
             try:
-                ser.write(b"PA HP\r\n")
+                mode = "LP" if pa_var.get().startswith("LP") else "HP"
+                pa_cmd, pwr_cmd = PA_SETTINGS[mode]
+                ser.write(pa_cmd)
                 ser.flush()
                 time.sleep(0.05)
-                ser.write(b"PWR 22\r\n")
+                ser.write(pwr_cmd)
                 ser.flush()
                 time.sleep(0.05)
                 ser.write(b"STATUS\r\n")
                 ser.flush()
-                append_log(">>> [GS] Uplink PA strictly LOCKED to RFO_HP (+22 dBm)\n", "info")
+                append_log(f">>> [GS] Uplink PA set to {pa_var.get()}\n", "info")
             except Exception as ex:
                 append_log(f"!!! Error updating PA: {ex}\n", "error")
 

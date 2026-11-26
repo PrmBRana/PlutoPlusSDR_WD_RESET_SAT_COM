@@ -202,17 +202,16 @@ void uart1_init(void)
   GPIOB_AFRL |=  (7UL << 24);
 
   /*
-   * 4. Enable USART1 (APB2 bit 14) and LPUART1 (APB1 bit 0) clocks
+   * 4. Enable USART1 (APB2 bit 14) clock only.
+   *    NOTE: Do NOT touch LPUART1 (PC0/PC1, /dev/ttyS1) from CPU2: CPU1 (M4)
+   *    owns LPUART1 exclusively for the ADCS / Camera MCU ("MSN" handshake
+   *    and JPEG capture). Dual-emitting or reading LPUART1 here corrupts
+   *    the ADCS UART stream and causes handshake failures.
    */
   RCC_APB2ENR     |= (1UL << 14);
   RCC_C2APB2ENR   |= (1UL << 14);
   RCC_APB2SMENR   |= (1UL << 14);
   RCC_C2APB2SMENR |= (1UL << 14);
-
-  RCC_APB1ENR2     |= (1UL << 0);
-  RCC_C2APB1ENR2   |= (1UL << 0);
-  RCC_APB1SMENR2   |= (1UL << 0);
-  RCC_C2APB1SMENR2 |= (1UL << 0);
 
   /*
    * 5. Initialize USART1 (PA9 / PB6 TX, PA10 RX)
@@ -234,37 +233,18 @@ void uart1_init(void)
       USART1_ICR = 0xFFFFFFFFUL;
       USART1_CR1 |= (USART_CR1_TE | USART_CR1_RE | USART_CR1_UE);
     }
-
-  /*
-   * 6. Initialize LPUART1 (PA2/PA3)
-   *    If CPU1 (NuttX) has already initialized LPUART1, do not smash its configuration.
-   *    If not yet initialized, configure for 48 MHz SYSCLK at 115200 baud (BRR = 106667).
-   */
-  if ((LPUART1_CR1 & USART_CR1_UE) == 0)
-    {
-      LPUART1_CR1 = 0;
-      LPUART1_BRR = 106667UL; /* (256 * 48,000,000) / 115,200 */
-      LPUART1_ICR = 0xFFFFFFFFUL;
-      LPUART1_CR1 = USART_CR1_TE | USART_CR1_RE | USART_CR1_UE;
-    }
-  else
-    {
-      LPUART1_ICR = 0xFFFFFFFFUL;
-      LPUART1_CR1 |= (USART_CR1_TE | USART_CR1_RE | USART_CR1_UE);
-    }
 }
 
 /*
  * ==========================================================================
- * uart1_putc - Emits to BOTH USART1 (PA9) and LPUART1 (PA2) safely
+ * uart1_putc - Emits to USART1 (PA9 / PB6) safely without touching LPUART1
  * ==========================================================================
  */
 
 void uart1_putc(char c)
 {
-  /* Ensure CPU2 clock gates remain active */
-  RCC_C2APB2ENR  |= (1UL << 14);
-  RCC_C2APB1ENR2 |= (1UL << 0);
+  /* Ensure CPU2 USART1 clock gate remains active */
+  RCC_C2APB2ENR |= (1UL << 14);
 
   /* Ensure USART1 is enabled */
   if ((USART1_CR1 & (USART_CR1_UE | USART_CR1_TE)) != (USART_CR1_UE | USART_CR1_TE))
@@ -272,9 +252,8 @@ void uart1_putc(char c)
       USART1_CR1 |= (USART_CR1_UE | USART_CR1_TE);
     }
 
-  /* Clear any error flags */
+  /* Clear any USART1 error flags */
   if (USART1_ISR & 0x1FUL) { USART1_ICR = 0x1FUL; }
-  if (LPUART1_ISR & 0x1FUL) { LPUART1_ICR = 0x1FUL; }
 
   /* Wait for TXE on USART1 with safe non-hanging timeout */
   uint32_t timeout_u1 = 50000UL;
@@ -285,20 +264,6 @@ void uart1_putc(char c)
   if (timeout_u1 > 0)
     {
       USART1_TDR = (uint32_t)(uint8_t)c;
-    }
-
-  /* Dual-emit to LPUART1 (PA2 / Arduino D1) if transmitter is ready */
-  if (LPUART1_CR1 & USART_CR1_TE)
-    {
-      uint32_t timeout_lpu = 50000UL;
-      while (((LPUART1_ISR & USART_ISR_TXE) == 0) && (timeout_lpu > 0))
-        {
-          timeout_lpu--;
-        }
-      if (timeout_lpu > 0)
-        {
-          LPUART1_TDR = (uint32_t)(uint8_t)c;
-        }
     }
 }
 
@@ -360,12 +325,6 @@ int uart1_try_getc(uint8_t *out_byte)
   if (USART1_ISR & USART_ISR_RXNE)
     {
       *out_byte = (uint8_t)(USART1_RDR & 0xFFUL);
-      return 1;
-    }
-
-  if (LPUART1_ISR & USART_ISR_RXNE)
-    {
-      *out_byte = (uint8_t)(*(volatile uint32_t *)(LPUART1_BASE + 0x24UL) & 0xFFUL);
       return 1;
     }
 

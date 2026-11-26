@@ -639,7 +639,9 @@ int main(void) {
     s_cw_step = 0; /* Start with CW1 */
     app_state = STATE_CW;
 
+    extern void CPU2_Heartbeat(void);
     while (1) {
+        CPU2_Heartbeat();
         /* Update telemetry from M4 shared ring buffer every iteration */
         if (Satellite_Drain_Telemetry(b1_data, b2_data)) {
             s_live_telem_seen = true;

@@ -312,10 +312,9 @@ b Infinite
 
 
 Default_Handler:
-
-
-b Default_Handler
-
+  bl Default_Handler_C
+1:
+  b 1b
 
 
 .size Default_Handler,.-Default_Handler

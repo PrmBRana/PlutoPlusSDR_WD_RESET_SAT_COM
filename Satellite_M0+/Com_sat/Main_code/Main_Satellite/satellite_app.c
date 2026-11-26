@@ -65,12 +65,21 @@ extern void CPU2_Delay_Ms(uint32_t ms);
 
 static void Satellite_GMSK_Stop(void)
 {
+    bool need_power_down = s_dcdc_hold ||
+        (HAL_GPIO_ReadPin(AMP_5V_EN_PORT, AMP_5V_EN_PIN) == GPIO_PIN_SET) ||
+        (HAL_GPIO_ReadPin(DCDC_5V_EN_PORT, DCDC_5V_EN_PIN) == GPIO_PIN_SET) ||
+        (HAL_GPIO_ReadPin(AMP_3V3_EN_PORT, AMP_3V3_EN_PIN) == GPIO_PIN_SET);
+
     s_dcdc_hold = false;
     SUBGRF_SetStandby(STDBY_XOSC);
     HAL_GPIO_WritePin(AMP_5V_EN_PORT, AMP_5V_EN_PIN, GPIO_PIN_RESET);
-    CPU2_Delay_Ms(10);
+    if (need_power_down) {
+        CPU2_Delay_Ms(10);
+    }
     HAL_GPIO_WritePin(DCDC_5V_EN_PORT, DCDC_5V_EN_PIN, GPIO_PIN_RESET);
-    CPU2_Delay_Ms(20);
+    if (need_power_down) {
+        CPU2_Delay_Ms(20);
+    }
     HAL_GPIO_WritePin(AMP_3V3_EN_PORT, AMP_3V3_EN_PIN, GPIO_PIN_RESET);
     RBI_SetTxSwitchConfig(RBI_SWITCH_RFO_LP);
     Satellite_SetRFSwitch(RBI_SWITCH_RX);
@@ -332,18 +341,21 @@ void Satellite_CW_Prepare(void) {
     /* A leftover GMSK hold would make SUBGRF_SetSwitch() take the 5V path. */
     Satellite_SetDCDCHold(false);
 
-    /* CW always uses the 3.3V PA (PC2); 5V DC/DC (PA0) and 5V PA (PC3) stay OFF */
+    /* CW always uses the 3.3V PA (PC2); 5V DC/DC (PA0) and 5V PA (PC3) stay OFF.
+     * Ensure 5V rails are off and settled before enabling the 3.3V PA load. */
     uart1_puts(">>> CW PREPARE: 3.3V PA (PC2=1, 5V PA OFF PC3=0, 5V Boost OFF PA0=0)\r\n");
-    RBI_Enable5VDCDC(0);
     HAL_GPIO_WritePin(AMP_5V_EN_PORT, AMP_5V_EN_PIN, GPIO_PIN_RESET); /* PC3 = 0 (5V PA OFF) */
-    HAL_GPIO_WritePin(AMP_3V3_EN_PORT, AMP_3V3_EN_PIN, GPIO_PIN_SET);   /* PC2 = 1 (3.3V PA ON for CW) */
+    RBI_Enable5VDCDC(0);                                               /* PA0 = 0 (5V Boost OFF) */
+    CPU2_Delay_Ms(10); /* Settle supply rail before biasing 3.3V PA */
 
-    /* Configure RF Switch for CW mode (RFO_LP path to 3.3V PA: PC4=0, PC5=1) */
+    /* Configure RF Switch for CW mode (RFO_LP path to 3.3V PA: PC4=0, PC5=1, PC2=1) */
     RBI_SetTxSwitchConfig(RBI_SWITCH_RFO_LP);
     Satellite_SetRFSwitch(RBI_SWITCH_RFO_LP);
-    CPU2_Delay_Ms(5); /* Settle delay for 3.3V PA */
+    CPU2_Delay_Ms(10); /* Settle delay for 3.3V PA */
 
-    /* Put radio in STDBY_XOSC: 32 MHz TCXO runs continuously without shutting down */
+    /* Put radio in STDBY_XOSC: 32 MHz TCXO runs continuously without shutting down.
+     * Avoid redundant SUBGRF_SetSwitch()/SMPS_DRIVE_SETTING_MAX surges here, which
+     * can glitch CPU2/ADC rails on lower battery voltages (~3.5 V). */
     SUBGRF_SetStandby(STDBY_XOSC);
     CPU2_Delay_Ms(10); /* Ensure TCXO is 100% stable */
     SUBGRF_SetDioIrqParams(IRQ_RADIO_NONE, IRQ_RADIO_NONE, IRQ_RADIO_NONE, IRQ_RADIO_NONE);
@@ -353,8 +365,6 @@ void Satellite_CW_Prepare(void) {
     SUBGRF_SetPaConfig(0x04, 0x00, 0x01, 0x01); /* RFO_LP PA configuration (deviceSel=0x01, hpMax=0x00) */
     SUBGRF_SetTxParams(pa_sel, power, RADIO_RAMP_200_US); /* soft ramp: smaller supply current step */
     SUBGRF_WriteRegister(REG_OCP, 0x38); /* 160 mA max current limit for full 14 dBm RF saturation */
-    SUBGRF_WriteRegister(REG_DRV_CTRL, 0x7 << 1);
-    SUBGRF_SetSwitch(pa_sel, RFSWITCH_TX);
     Satellite_Log_PaPins("CW");
 }
 
@@ -363,8 +373,6 @@ void Satellite_CW_CarrierOn(void) {
     SUBGRF_SetPaConfig(0x04, 0x00, 0x01, 0x01); /* RFO_LP (+14 dBm) */
     SUBGRF_SetTxParams(RFO_LP, power, RADIO_RAMP_200_US); /* soft ramp: smaller supply current step */
     SUBGRF_WriteRegister(REG_OCP, 0x38);
-    SUBGRF_WriteRegister(REG_DRV_CTRL, 0x7 << 1);
-    SUBGRF_SetSwitch(RFO_LP, RFSWITCH_TX);
     SUBGRF_SetTxContinuousWave();
 }
 

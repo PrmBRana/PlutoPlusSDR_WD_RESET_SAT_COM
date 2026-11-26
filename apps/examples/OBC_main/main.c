@@ -1563,14 +1563,22 @@ static void obc_msn_power(bool enable)
     {
       irqstate_t flags = enter_critical_section();
 
-      /* Ensure GPIOA/GPIOC clocks and PA0/PA12/PC13 remain configured as Output Push-Pull */
+      /* Ensure GPIOA/GPIOC clocks are active; only touch MODER/OTYPER/PUPDR
+       * if a pin is not already configured as output push-pull (avoids
+       * unnecessary RMW races on shared GPIOA/GPIOC registers with CPU2). */
       WL55_RCC_AHB2ENR |= (1UL << 0) | (1UL << 2);
-      WL55_GPIOA_MODER   = (WL55_GPIOA_MODER   & ~((3UL << 0) | (3UL << 24))) | (1UL << 0) | (1UL << 24);
-      WL55_GPIOA_OTYPER &= ~((1UL << 0) | (1UL << 12));
-      WL55_GPIOA_PUPDR  &= ~((3UL << 0) | (3UL << 24));
-      WL55_GPIOC_MODER   = (WL55_GPIOC_MODER   & ~(3UL << 26)) | (1UL << 26);
-      WL55_GPIOC_OTYPER &= ~(1UL << 13);
-      WL55_GPIOC_PUPDR  &= ~(3UL << 26);
+      if ((WL55_GPIOA_MODER & ((3UL << 0) | (3UL << 24))) != ((1UL << 0) | (1UL << 24)))
+        {
+          WL55_GPIOA_MODER   = (WL55_GPIOA_MODER & ~((3UL << 0) | (3UL << 24))) | (1UL << 0) | (1UL << 24);
+          WL55_GPIOA_OTYPER &= ~((1UL << 0) | (1UL << 12));
+          WL55_GPIOA_PUPDR  &= ~((3UL << 0) | (3UL << 24));
+        }
+      if ((WL55_GPIOC_MODER & (3UL << 26)) != (1UL << 26))
+        {
+          WL55_GPIOC_MODER   = (WL55_GPIOC_MODER & ~(3UL << 26)) | (1UL << 26);
+          WL55_GPIOC_OTYPER &= ~(1UL << 13);
+          WL55_GPIOC_PUPDR  &= ~(3UL << 26);
+        }
 
       /* 1. Enable 5V (PA0) and 3.3V (PA12) DC/DC & OCP rails first */
       WL55_GPIOA_BSRR = (1UL << 0) | (1UL << 12);
@@ -1602,12 +1610,18 @@ static void obc_msn_power_3v3_only(bool enable)
       irqstate_t flags = enter_critical_section();
 
       WL55_RCC_AHB2ENR |= (1UL << 0) | (1UL << 2);
-      WL55_GPIOA_MODER   = (WL55_GPIOA_MODER   & ~((3UL << 0) | (3UL << 24))) | (1UL << 0) | (1UL << 24);
-      WL55_GPIOA_OTYPER &= ~((1UL << 0) | (1UL << 12));
-      WL55_GPIOA_PUPDR  &= ~((3UL << 0) | (3UL << 24));
-      WL55_GPIOC_MODER   = (WL55_GPIOC_MODER   & ~(3UL << 26)) | (1UL << 26);
-      WL55_GPIOC_OTYPER &= ~(1UL << 13);
-      WL55_GPIOC_PUPDR  &= ~(3UL << 26);
+      if ((WL55_GPIOA_MODER & ((3UL << 0) | (3UL << 24))) != ((1UL << 0) | (1UL << 24)))
+        {
+          WL55_GPIOA_MODER   = (WL55_GPIOA_MODER & ~((3UL << 0) | (3UL << 24))) | (1UL << 0) | (1UL << 24);
+          WL55_GPIOA_OTYPER &= ~((1UL << 0) | (1UL << 12));
+          WL55_GPIOA_PUPDR  &= ~((3UL << 0) | (3UL << 24));
+        }
+      if ((WL55_GPIOC_MODER & (3UL << 26)) != (1UL << 26))
+        {
+          WL55_GPIOC_MODER   = (WL55_GPIOC_MODER & ~(3UL << 26)) | (1UL << 26);
+          WL55_GPIOC_OTYPER &= ~(1UL << 13);
+          WL55_GPIOC_PUPDR  &= ~(3UL << 26);
+        }
 
       /* Keep PA0 (5V) OFF, enable PA12 (3.3V) ONLY */
       WL55_GPIOA_BSRR = (1UL << (0 + 16)) | (1UL << 12);
@@ -3606,6 +3620,8 @@ static void process_ground_commands(void)
             SHARED_FLASH_REQ->seq = (cap_len > 0) ? 1 : 0;
             printf("[OBC] Submitted capture status to M0+: %s (%u B)\n",
                    (cap_len > 0) ? "OK" : "FAIL", (unsigned)cap_len);
+            fflush(stdout);
+            usleep(25000); /* Let PA0 5V rail & USART1 TX settle before M0+ GMSK ACK/NACK */
             ipcc_m4_send(IPCC_CH_COMMAND); /* Signal M0+ that capture task is complete */
           }
         else if (is_cam_down)
@@ -3630,6 +3646,8 @@ static void process_ground_commands(void)
             SHARED_FLASH_REQ->seq = (cap_len > 0) ? 1 : 0;
             printf("[OBC] Submitted capture status to M0+: %s (%u B)\n",
                    (cap_len > 0) ? "OK" : "FAIL", (unsigned)cap_len);
+            fflush(stdout);
+            usleep(25000); /* Let PA0 5V rail & USART1 TX settle before M0+ GMSK ACK/NACK */
             ipcc_m4_send(IPCC_CH_COMMAND); /* Signal M0+ that capture task is complete */
           }
 

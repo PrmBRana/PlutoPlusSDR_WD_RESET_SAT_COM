@@ -1399,12 +1399,18 @@ void GS_Handle_Command_Line(const char *p)
     else if (strcmp(u, "RF") == 0 || strcmp(u, "RFPINS") == 0 || strcmp(u, "PINS") == 0) {
         GS_Print_RF_Pins();
     }
-    /* PA selection: GS is strictly LOCKED to RFO_HP (+22 dBm) */
-    else if (strcmp(u, "PA LP") == 0 || strcmp(u, "PA HP") == 0 || strcmp(u, "PA") == 0) {
+    /* PA selection: HP = RFO_HP (+22 dBm default), LP = RFO_LP (+14 dBm) */
+    else if (strcmp(u, "PA LP") == 0) {
+        RadioApp_SetPaSelect(RFO_LP);
+        if (RadioApp_GetTxPower() > 14) RadioApp_SetTxPower(14);
+        GS_SetRFSwitch(RBI_SWITCH_RFO_LP);
+        uart2_printf(">>> [GS-PA] Switched to RFO_LP (%+d dBm) <<<\r\n", (int)RadioApp_GetTxPower());
+    }
+    else if (strcmp(u, "PA HP") == 0 || strcmp(u, "PA") == 0) {
         RadioApp_SetPaSelect(RFO_HP);
         RadioApp_SetTxPower(22);
         GS_SetRFSwitch(RBI_SWITCH_RFO_HP);
-        uart2_puts(">>> [GS-PA] Ground Station LOCKED to RFO_HP (+22 dBm, Nucleo-WL55JC2 SMA) <<<\r\n");
+        uart2_puts(">>> [GS-PA] Switched to RFO_HP (+22 dBm, Nucleo-WL55JC2 SMA) <<<\r\n");
     }
     /* TX power */
     else if (strncmp(u, "PWR ", 4) == 0 || strncmp(u, "POWER ", 6) == 0) {
@@ -1412,9 +1418,12 @@ void GS_Handle_Command_Line(const char *p)
         while (*arg && *arg != ' ') arg++;
         while (*arg == ' ') arg++;
         int pwr = atoi(arg);
-        if (pwr > 22) pwr = 22;
+        int max_p = (RadioApp_GetPaSelect() == RFO_LP) ? 14 : 22;
+        if (pwr > max_p) pwr = max_p;
         RadioApp_SetTxPower((int8_t)pwr);
-        uart2_printf(">>> TX Power: %+d dBm (RFO_HP) <<<\r\n", (int)RadioApp_GetTxPower());
+        uart2_printf(">>> TX Power: %+d dBm (%s) <<<\r\n",
+                     (int)RadioApp_GetTxPower(),
+                     (RadioApp_GetPaSelect() == RFO_LP) ? "RFO_LP" : "RFO_HP");
     }
     /* Auto-command */
     else if (strncmp(u, "AUTO ", 5) == 0) {

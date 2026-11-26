@@ -233,13 +233,43 @@ static inline void stm32wl5_ext_wdt_kick(void)
 }
 
 #ifdef CONFIG_BOARD_LATE_INITIALIZE
+/* Shared SRAM2 liveness heartbeat written by CPU2 (M0+) */
+#define M0_HB_MAGIC_ADDR        0x20008040UL
+#define M0_HB_COUNT_ADDR        0x20008044UL
+#define M0_HB_MAGIC_VAL         0x4D304842UL /* "M0HB" */
+#define M0_HB_STALL_TICKS       60U          /* 60 x 500 ms = 30 s stall threshold */
+
 static int stm32wl5_ext_wdt_task(int argc, char *argv[])
 {
+  uint32_t last_hb = 0;
+  uint32_t stall_ticks = 0;
+
   UNUSED(argc);
   UNUSED(argv);
 
   while (1)
     {
+      /* Monitor CPU2 (M0+) liveness once Satellite M0+ firmware has armed its
+       * heartbeat magic (ignored on Ground Station boards running gs_m0plus).
+       */
+
+      if (getreg32(M0_HB_MAGIC_ADDR) == M0_HB_MAGIC_VAL)
+        {
+          uint32_t cur_hb = getreg32(M0_HB_COUNT_ADDR);
+          if (cur_hb != last_hb)
+            {
+              last_hb = cur_hb;
+              stall_ticks = 0;
+            }
+          else if (++stall_ticks >= M0_HB_STALL_TICKS)
+            {
+              syslog(LOG_ERR,
+                     "[WDT] CPU2 (M0+) stalled for 30s! Stopping PB8 kick for recovery reset...\n");
+              nxsig_usleep(3000000); /* Allow external 1.6 s hardware WDT to reset first */
+              up_systemreset();      /* Bench fallback if external WDT IC is unpopulated */
+            }
+        }
+
       stm32wl5_ext_wdt_kick();
 
       nxsig_usleep(500000);  /* 500 ms */
@@ -251,6 +281,11 @@ static int stm32wl5_ext_wdt_task(int argc, char *argv[])
 
 void stm32wl5_board_initialize(void)
 {
+  /* Clear CPU2 liveness magic in shared SRAM2 before CPU2 boots */
+
+  putreg32(0, 0x20008040UL);
+  putreg32(0, 0x20008044UL);
+
   /* External 1.6 s Watchdog WDI (PB8): push-pull output, kick immediately
    * from bootup (edge-triggered: must toggle faster than 1.6 s).
    * Global Reset pin PA11: drive LOW (idle) at bootup; pulsed HIGH every 24h.
